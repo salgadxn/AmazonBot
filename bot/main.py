@@ -11,18 +11,17 @@ import datetime as dt
 import logging
 import sys
 import time
-from urllib.parse import quote_plus
 
 from . import rules
 from .config import (DATA_DIR, OUTPUT_DIR, PRICE_LIST_DIR, env, load_config,
                      load_retailers, load_seed_brands)
-from .outputs import (BRAND_COLUMNS, FIND_SUPPLIER_COLUMNS, LEAD_COLUMNS,
-                      discord_alert, discord_summary, write_csv, write_sheets)
-from .profit import ProductCosts, calc_profit, max_buy_price
+from .outputs import (BRAND_COLUMNS, LEAD_COLUMNS, NO_SUPPLIER_COLUMNS, OPTION_COLUMNS,
+                      REVIEW_COLUMNS, discord_alert, discord_summary, write_csv, write_sheets)
+from .profit import ProductCosts, max_buy_price
+from .sourcing import Candidate, decide, no_supplier_row
 from .spapi import SPAPI, CatalogItem, SPAPIAuthError, SPAPIError
 from .store import Store
-from .suppliers import (best_serp_offer, find_retailer, load_price_lists,
-                        match_price_list, serpapi_lookup)
+from .suppliers import SerpApi, load_price_lists, source_product
 
 log = logging.getLogger("amazonbot")
 
@@ -58,7 +57,20 @@ def check_setup() -> int:
         if price:
             fees = api.get_fees({items[0].asin: price}).get(items[0].asin)
             print(f"   referral ${fees.referral:.2f}, FBA ${fees.fba:.2f}")
-    print("\nEverything works. Your keys are set up correctly.")
+    key = env("SERPAPI_KEY")
+    if not key:
+        print("5) SerpApi: NOT SET — add a SERPAPI_KEY secret to enable supplier search")
+    else:
+        import tempfile
+        from pathlib import Path
+        tmp = Store(Path(tempfile.mkdtemp()) / "check.db")
+        serp = SerpApi(key, load_config(), tmp)
+        if serp.disabled_reason:
+            print(f"5) SerpApi: PROBLEM — {serp.disabled_reason}")
+        else:
+            print(f"5) SerpApi: OK — {serp.searches_left} searches left this month, "
+                  f"today's budget {serp.budget}")
+    print("\nAmazon keys work. Fix anything marked NOT SET / PROBLEM above.")
     return 0
 
 
@@ -209,142 +221,116 @@ def run(asins: list[str] | None = None) -> int:
         # 4. Fees
         fees = api.get_fees({it.asin: o.sell_price for it, o in priced}) if priced else {}
 
-        # 5. Analyse
-        leads, find_supplier, viable = [], [], []
+        # 5. Analyse each product (history, flags, max buy price)
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        candidates: list[Candidate] = []
+        dropped = {"no fees": 0, "Amazon selling": 0, "compliance": 0, "bundle": 0, "no margin": 0}
         for it, o in priced:
             f = fees.get(it.asin)
             hist = store.analyze(it.asin, o.sell_price, o.total_offers)
             store.save_snapshot(it.asin, o.buybox_price, o.fba_offers, o.fbm_offers,
                                 o.total_offers, o.amazon_on_listing, it.rank)
             if not f or f.error:
+                dropped["no fees"] += 1
                 continue
+            est = rules.est_monthly_sales(it.rank)
             flags = list(hist.flags)
             if o.amazon_on_listing:
-                flags.insert(0, "Amazon is selling this now")
+                flags.insert(0, ("amazon_now", "Amazon is selling this now"))
             if o.buybox_price is None:
-                flags.append("No buy box right now (suppressed?) — priced off lowest FBA offer")
+                flags.append(("no_buybox", "No buy box right now (suppressed?) — priced off lowest FBA offer"))
             if o.buybox_is_fba is False:
-                flags.append("Buy box held by a merchant-fulfilled seller")
-            est = rules.est_monthly_sales(it.rank)
-            serious, info, is_bundle = rules.listing_flags(
-                it.title, it.category, est, o.fba_offers, cfg)
-            if is_bundle and cfg.get("competition", {}).get("skip_seller_bundles", True):
+                flags.append(("mfn_buybox", "Buy box held by a merchant-fulfilled seller"))
+            lflags, is_bundle = rules.listing_flags(it.title, it.category, est, o.fba_offers, cfg)
+            flags += lflags
+            if o.amazon_on_listing:
+                dropped["Amazon selling"] += 1
                 continue
-            flags += serious
-
+            if rules.blocking(flags, cfg):
+                dropped["compliance"] += 1
+                continue
+            if is_bundle and cfg.get("competition", {}).get("skip_seller_bundles", True):
+                dropped["bundle"] += 1
+                continue
             pc = ProductCosts(sell_price=o.sell_price, referral_fee=f.referral,
                               fba_fee=f.fba, closing_fee=f.closing, category=it.category,
                               weight_lb=it.weight_lb, length_in=it.length_in,
                               width_in=it.width_in, height_in=it.height_in)
-            std_max = max_buy_price(pc, cfg, cfg["thresholds"]["min_profit"],
-                                    cfg["thresholds"]["min_roi"])
-            sm = cfg["starter_mode"]
-            starter_max = (max_buy_price(pc, cfg, sm["min_profit"], sm["min_roi"])
-                           if sm.get("enabled") and (est or 0) >= sm["min_est_monthly_sales"]
-                           else 0.0)
-            if max(std_max, starter_max) <= 0 or o.amazon_on_listing:
+            min_p, min_r, rule = rules.targets(est, cfg)
+            mb = max_buy_price(pc, cfg, min_p, min_r)
+            if mb <= 0:
+                dropped["no margin"] += 1
                 continue
-            viable.append(dict(it=it, o=o, f=f, pc=pc, est=est, flags=flags, info=info, hist=hist,
-                               std_max=std_max, starter_max=starter_max))
+            c = Candidate(it=it, o=o, f=f, pc=pc, est=est, flags=flags, hist=hist, max_buy=mb,
+                          min_profit=min_p, min_roi=min_r, rule=rule)
+            c.priority = rules.score(0.5, min_p, est, o.fba_offers, True, rules.n_serious(flags)) \
+                + min(mb, 30) / 3
+            candidates.append(c)
+        run_log.append("Dropped before sourcing: " +
+                       ", ".join(f"{k} {v}" for k, v in dropped.items() if v) if any(dropped.values())
+                       else "Dropped before sourcing: none")
 
-        # 6. Suppliers
-        serp_key = env("SERPAPI_KEY")
-        serp_budget = cfg["suppliers"]["serpapi_max_lookups_per_run"] if serp_key else 0
-        viable.sort(key=lambda v: rules.score(0.5, 5, v["est"], v["o"].fba_offers, True,
-                                              len(v["flags"])), reverse=True)
-        for v in viable:
-            it, o, pc = v["it"], v["o"], v["pc"]
-            offer = match_price_list(it.upcs, price_list)
-            if offer is None and it.upcs:
-                upc = it.upcs[0]
-                results = store.cached_serp(upc, cfg["suppliers"]["serpapi_cache_days"])
-                if results is None and serp_budget > 0:
-                    serp_budget -= 1
-                    results = serpapi_lookup(upc, serp_key)
-                    store.save_serp(upc, results)
-                if results:
-                    offer = best_serp_offer(results, it.title, retailers, cfg)
-
-            base_row = {
-                "Product": it.title, "ASIN": it.asin, "Amazon link": it.amazon_url,
-                "Brand": it.brand, "Category": it.category, "Amazon price": o.sell_price,
-                "Est. sales/mo (estimate)": v["est"] or "", "Sales rank": it.rank or "",
-                "FBA sellers": o.fba_offers, "FBM sellers": o.fbm_offers,
-                "Amazon on listing": "Yes" if o.amazon_on_listing else "No",
-                "Eligibility": "Eligible", "Referral fee": v["f"].referral,
-                "FBA fee": v["f"].fba, "Price stability": v["hist"].stability,
-                "Red flags": "; ".join(v["flags"] + v["info"]), "Last checked": now,
-            }
-
-            if offer is None:
-                q = it.upcs[0] if it.upcs else it.title
-                find_supplier.append({**base_row,
-                    "Score": rules.score(0.35, 5, v["est"], o.fba_offers, False, len(v["flags"])),
-                    "UPC": ", ".join(it.upcs[:3]),
-                    "Max buy price (Standard)": round(v["std_max"], 2),
-                    "Max buy price (Starter)": round(v["starter_max"], 2) or "",
-                    "Google search": f"https://www.google.com/search?tbm=shop&q={quote_plus(q)}"})
+        # 6. Supplier discovery — best candidates first, so the search budget goes where it counts
+        serp = SerpApi(env("SERPAPI_KEY"), cfg, store)
+        if serp.disabled_reason:
+            run_log.append(f"⚠️ SUPPLIER SEARCH OFF: {serp.disabled_reason}")
+        else:
+            run_log.append(f"SerpApi OK: {serp.searches_left if serp.searches_left is not None else '?'} "
+                           f"searches left this month; budget this run {serp.budget}")
+        candidates.sort(key=lambda c: c.priority, reverse=True)
+        leads, review, options, no_supplier = [], [], [], []
+        min_mb = cfg["suppliers"].get("min_candidate_max_buy", 3.0)
+        for c in candidates:
+            blocks = rules.lead_blockers(c.flags, cfg)
+            if blocks:
+                no_supplier.append(no_supplier_row(c, now, "Not searched — listing problem: " + "; ".join(blocks)))
                 continue
-
-            rkey, retailer = (offer.retailer_key, retailers["retailers"][offer.retailer_key]) \
-                if offer.retailer_key else find_retailer(offer.supplier, retailers)
-            res = calc_profit(pc, offer.price, cfg, retailer=retailer)
-            min_p, min_r, rule = rules.targets(v["est"], cfg)
-            certain_profit = res.profit + res.savings_certain
-            certain_cost = res.landed_cost - res.savings_certain
-            certain_roi = certain_profit / certain_cost if certain_cost else 0
-            ok = rules.passes(res.profit, res.roi, min_p, min_r) or \
-                rules.passes(certain_profit, certain_roi, min_p, min_r)
-            notes = list(res.notes)
-            if not rkey:
-                notes.append("unknown retailer — verify it's legit & gives an invoice")
-            if retailer.get("free_shipping_min") and offer.price < retailer["free_shipping_min"]:
-                notes.append(f"order ${retailer['free_shipping_min']:.0f}+ for free shipping")
-            if not offer.verified:
-                notes.append("product match is weak — confirm it's the same item/size/pack")
-            if not ok:
+            if c.max_buy < min_mb:
+                no_supplier.append(no_supplier_row(
+                    c, now, f"Not searched — max buy price ${c.max_buy:.2f} is under ${min_mb:.2f}, "
+                            "almost never available that cheap"))
                 continue
-            qty = rules.suggested_qty(v["est"], o.fba_offers, res.landed_cost, cfg)
-            leads.append({**base_row,
-                "Score": rules.score(res.roi, res.profit, v["est"], o.fba_offers,
-                                     offer.verified, len(v["flags"])),
-                "Supplier": offer.supplier, "Supplier link": offer.link,
-                "Match": f"{offer.match_type} ({offer.match_score:.2f})",
-                "Buy price": offer.price, "Closing fee": res.closing,
-                "Storage (est)": res.storage, "Returns reserve (est)": res.returns,
-                "Inbound ship": res.inbound, "Prep+misc": res.prep_misc, "Tax": res.tax,
-                "Total cost (landed)": res.landed_cost, "Net profit": res.profit,
-                "ROI": pct(res.roi), "Margin": pct(res.margin),
-                "Profit if price -10%": res.profit_at_drop,
-                "Profit w/ savings": res.profit_with_savings,
-                "ROI w/ savings": pct(res.roi_with_savings),
-                "Certain savings": res.savings_certain, "Rule": rule,
-                "Suggested qty": qty, "Notes": "; ".join(notes)})
+            result = source_product(c.it, price_list, serp, retailers, cfg)
+            lead, rev, opts, none = decide(c, result, retailers, cfg, now)
+            options += opts
+            if lead:
+                leads.append(lead)
+            elif rev:
+                review.append(rev)
+            else:
+                no_supplier.append(none)
 
-        leads.sort(key=lambda r: r["Score"], reverse=True)
-        find_supplier.sort(key=lambda r: r["Score"], reverse=True)
-        run_log.append(f"Leads with a supplier: {len(leads)}; eligible products needing a "
-                       f"supplier: {len(find_supplier)}")
+        for rows in (leads, review, no_supplier):
+            rows.sort(key=lambda r: r["Score"], reverse=True)
+        run_log.append(f"SerpApi used {serp.calls} searches (+{serp.cache_hits} from cache)"
+                       + (f"; errors: {' | '.join(serp.errors[:3])}" if serp.errors else ""))
+        result_line = (f"RESULT: {len(leads)} Leads, {len(review)} Needs Review, "
+                       f"{len(no_supplier)} without a usable supplier, {len(options)} supplier offers compared")
+        run_log.append(result_line)
 
         # 7. Outputs
         brand_rows = [dict(zip(BRAND_COLUMNS, b)) for b in store.all_brands()]
-        write_csv(OUTPUT_DIR / "leads.csv", LEAD_COLUMNS, leads)
-        write_csv(OUTPUT_DIR / "find_supplier.csv", FIND_SUPPLIER_COLUMNS, find_supplier)
-        write_csv(OUTPUT_DIR / "brands.csv", BRAND_COLUMNS, brand_rows)
+        tabs = {
+            "Leads": (LEAD_COLUMNS, leads),
+            "Needs Review": (REVIEW_COLUMNS, review),
+            "Supplier Options": (OPTION_COLUMNS, options),
+            "No Supplier Yet": (NO_SUPPLIER_COLUMNS, no_supplier),
+            "Brands": (BRAND_COLUMNS, brand_rows),
+        }
+        for name, (cols, rows) in tabs.items():
+            write_csv(OUTPUT_DIR / f"{name.lower().replace(' ', '_')}.csv", cols, rows)
 
         sheet_id, sa_json = env("GOOGLE_SHEET_ID"), env("GOOGLE_SERVICE_ACCOUNT_JSON")
         run_log.append(f"Finished in {(time.time() - started) / 60:.1f} min")
         if sheet_id and sa_json:
             try:
                 write_sheets(sheet_id, sa_json, {
-                    "Leads": (LEAD_COLUMNS, leads),
-                    "Find Supplier": (FIND_SUPPLIER_COLUMNS, find_supplier),
-                    "Brands": (BRAND_COLUMNS, brand_rows),
-                    "Run Log": (["Message"], [{"Message": m} for m in run_log]),
-                })
+                    **tabs, "Run Log": (["Message"], [{"Message": m} for m in run_log])})
             except Exception as exc:  # keep the run's CSVs even if Sheets fails
                 run_log.append(f"Google Sheet update failed: {exc}")
+        else:
+            run_log.append("Google Sheet not set up (GOOGLE_SHEET_ID / GOOGLE_SERVICE_ACCOUNT_JSON) — "
+                           "results are in the run's 'results' download")
 
         webhook = env("DISCORD_WEBHOOK_URL")
         if webhook:
@@ -359,8 +345,8 @@ def run(asins: list[str] | None = None) -> int:
                     store.mark_alerted(lead["ASIN"], lead["Net profit"], lead["Eligibility"])
                     sent += 1
             discord_summary(webhook, f"**AmazonBot daily run** — {len(leads)} leads, "
-                                     f"{len(find_supplier)} eligible products to price-check, "
-                                     f"{sent} new alert(s).")
+                                     f"{len(review)} to review, {sent} new alert(s).\n"
+                                     + "\n".join(m for m in run_log if "SerpApi" in m or "SUPPLIER" in m))
     finally:
         (OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
         (OUTPUT_DIR / "run_log.txt").write_text("\n".join(run_log), encoding="utf-8")

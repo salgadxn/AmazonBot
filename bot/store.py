@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS brands (
 CREATE TABLE IF NOT EXISTS alerts (
   asin TEXT PRIMARY KEY, sent TEXT, profit REAL, eligibility TEXT);
 CREATE TABLE IF NOT EXISTS serp_cache (
-  upc TEXT PRIMARY KEY, fetched TEXT, json TEXT);
+  upc TEXT PRIMARY KEY, fetched TEXT, json TEXT);  -- upc column holds any cache key
 """
 
 
@@ -36,7 +36,7 @@ def today() -> str:
 class HistoryReport:
     days: int = 0
     stability: str = "Not enough history"
-    flags: list[str] = field(default_factory=list)
+    flags: list[tuple[str, str]] = field(default_factory=list)  # (key, text)
 
 
 class Store:
@@ -68,19 +68,19 @@ class Store:
         if not rows:
             return rep
         if any(r[3] for r in rows):
-            rep.flags.append("Amazon sold this in the last 90 days")
+            rep.flags.append(("amazon_recent", "Amazon sold this in the last 90 days"))
 
         recent = rows[-4:]
         peak = max((r[2] or 0) for r in recent)
         if peak >= 5 and current_offers <= peak * 0.6:
-            rep.flags.append(f"Sellers dropped {peak}->{current_offers} in a few days "
-                             "(possible IP complaint)")
+            rep.flags.append(("ip_drop", f"Sellers dropped {peak}->{current_offers} in a few days "
+                                         "(possible IP complaint)"))
 
         prices = [r[1] for r in rows[-30:] if r[1]]
         if len(prices) >= 7:
             med = statistics.median(prices)
             if current_price and current_price > med * 1.25:
-                rep.flags.append(f"Price spike: now ${current_price:.2f} vs usual ${med:.2f}")
+                rep.flags.append(("price_spike", f"Price spike: now ${current_price:.2f} vs usual ${med:.2f}"))
             cv = statistics.pstdev(prices) / statistics.mean(prices)
             rep.stability = "Stable" if cv < 0.08 else "Moderate" if cv < 0.2 else "Volatile"
         else:

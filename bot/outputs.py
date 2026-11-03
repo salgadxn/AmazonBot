@@ -10,26 +10,33 @@ import requests
 
 log = logging.getLogger(__name__)
 
-LEAD_COLUMNS = [
-    "Score", "Product", "ASIN", "Amazon link", "Brand", "Category",
-    "Supplier", "Supplier link", "Match", "Buy price", "Amazon price",
-    "Est. sales/mo (estimate)", "Sales rank", "FBA sellers", "FBM sellers",
-    "Amazon on listing", "Eligibility", "Apply link",
-    "Referral fee", "FBA fee", "Closing fee", "Storage (est)", "Returns reserve (est)",
-    "Inbound ship", "Prep+misc", "Tax", "Total cost (landed)",
-    "Net profit", "ROI", "Margin", "Profit if price -10%",
-    "Profit w/ savings", "ROI w/ savings", "Certain savings",
-    "Rule", "Suggested qty", "Price stability", "Red flags", "Notes", "Last checked",
+_PROFIT_COLS = [
+    "Amazon price", "Est. sales/mo (estimate)", "Sales rank", "FBA sellers", "FBM sellers",
+    "Eligibility", "Referral fee", "FBA fee", "Closing fee", "Storage (est)",
+    "Returns reserve (est)", "Inbound ship", "Prep+misc", "Tax", "Retailer ship/unit",
+    "Total cost (landed)", "Net profit", "ROI", "Margin", "Profit if price -10%",
+    "Profit w/ savings", "ROI w/ savings", "Certain savings", "Rule", "Suggested qty",
+    "Price stability", "Flags", "Notes", "Last checked",
 ]
-
-FIND_SUPPLIER_COLUMNS = [
-    "Score", "Product", "ASIN", "Amazon link", "Brand", "Category", "UPC",
-    "Amazon price", "Max buy price (Standard)", "Max buy price (Starter)",
-    "Est. sales/mo (estimate)", "Sales rank", "FBA sellers", "FBM sellers",
-    "Eligibility", "Referral fee", "FBA fee", "Price stability", "Red flags",
-    "Google search", "Last checked",
+_OFFER_COLS = [
+    "Retailer", "Buy link", "Advertised price", "Units per Amazon unit", "Cost per Amazon unit",
+    "Retailer shipping", "Availability", "Price checked", "Match", "Match details",
+    "Other suppliers",
 ]
+_ID_COLS = ["Score", "Product", "ASIN", "Amazon link", "Brand", "Category"]
 
+LEAD_COLUMNS = _ID_COLS + _OFFER_COLS + _PROFIT_COLS
+REVIEW_COLUMNS = _ID_COLS[:3] + ["Why not a Lead"] + _ID_COLS[3:] + _OFFER_COLS + _PROFIT_COLS
+OPTION_COLUMNS = [
+    "ASIN", "Product", "Retailer", "Trusted store", "Advertised price", "Units per Amazon unit",
+    "Cost per Amazon unit", "Retailer shipping", "Availability", "Match", "Match details",
+    "Net profit", "ROI", "Can be a Lead", "Why not", "Buy link", "Source", "Price checked",
+]
+NO_SUPPLIER_COLUMNS = [
+    "Score", "Product", "ASIN", "Amazon link", "Brand", "Category", "UPC", "Amazon price",
+    "Max buy price", "Est. sales/mo (estimate)", "Sales rank", "FBA sellers", "Eligibility",
+    "Why no lead", "Flags", "Google search", "Last checked",
+]
 BRAND_COLUMNS = ["Brand", "Source", "Status", "Eligible products", "Products checked",
                  "Last checked"]
 
@@ -72,23 +79,27 @@ def _cell(v):
 
 
 def discord_alert(webhook: str, lead: dict) -> None:
+    buy = f"${lead['Cost per Amazon unit']:.2f} at {lead['Retailer']}"
+    if lead.get("Units per Amazon unit", 1) > 1:
+        buy += f" (buy {lead['Units per Amazon unit']})"
     fields = [
-        {"name": "Buy", "value": f"${lead['Buy price']:.2f} @ {lead['Supplier']}", "inline": True},
+        {"name": "Buy", "value": buy, "inline": True},
         {"name": "Sell", "value": f"${lead['Amazon price']:.2f}", "inline": True},
         {"name": "Profit / ROI", "value": f"${lead['Net profit']:.2f} / {lead['ROI']}", "inline": True},
         {"name": "Est. sales/mo", "value": str(lead["Est. sales/mo (estimate)"]), "inline": True},
         {"name": "FBA sellers", "value": str(lead["FBA sellers"]), "inline": True},
-        {"name": "Match", "value": lead["Match"], "inline": True},
+        {"name": "Match", "value": f"{lead['Match']} · {lead['Availability']}", "inline": True},
     ]
-    if lead.get("Red flags"):
-        fields.append({"name": "⚠️ Flags", "value": lead["Red flags"][:1000]})
+    if lead.get("Flags"):
+        fields.append({"name": "⚠️ Flags", "value": lead["Flags"][:1000]})
     payload = {"embeds": [{
         "title": lead["Product"][:250],
         "url": lead["Amazon link"],
-        "description": f"[Supplier link]({lead['Supplier link']})" if lead.get("Supplier link") else "",
+        "description": f"[Buy at {lead['Retailer']}]({lead['Buy link']})" if lead.get("Buy link") else "",
         "color": 0x2ECC71,
         "fields": fields,
-        "footer": {"text": f"Score {lead['Score']} • {lead['Eligibility']} • check the chart in SellerAmp before buying"},
+        "footer": {"text": f"Score {lead['Score']} • price checked {lead['Price checked']} • "
+                           "check the chart in SellerAmp before buying"},
     }]}
     resp = requests.post(webhook, json=payload, timeout=30)
     if resp.status_code >= 300:

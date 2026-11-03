@@ -65,6 +65,33 @@ import re as _re
 BUNDLE_WORDS = _re.compile(
     r"(\bbundle\b|\bincludes\b|\+ ?your|recipe card|vitamin guide|\bwith (a |an )?(free )?"
     r"(guide|card|ebook|e-book|pouch|pouches|scoop|spoon|sticker)s?\b|\bbonus\b)", _re.I)
+
+# (key, regex, message). Which keys BLOCK a product is set in config.yaml -> compliance.block
+COMPLIANCE = [
+    ("hazmat", r"aerosol|flammable|lithium|butane|propane|lighter fluid|\blighters?\b|nail polish|"
+               r"spray paint|kerosene|lamp oil|hand sanitizer|rubbing alcohol|isopropyl|perfume|"
+               r"eau de (toilette|parfum)|cologne|hair ?spray|dry shampoo|fireworks|bleach",
+     "Possible hazmat (dangerous goods review / often restricted)"),
+    ("pesticide", r"insecticide|pesticide|bug spray|insect repellent|mosquito repellent|kills? "
+                  r"(bugs|ants|roaches|fleas|ticks|mosquitoes)|flea (and|&) tick|rodenticide|"
+                  r"weed killer|herbicide|lice treatment|ant bait|roach bait|(mouse|rat) poison|fungicide",
+     "Pesticide claim (EPA rules; usually restricted)"),
+    ("cbd", r"\bcbd\b|hemp extract|cannabidiol|delta[- ]?[89]|kratom|\bthc\b|kava",
+     "CBD/hemp/kratom (prohibited or heavily restricted)"),
+    ("age_restricted", r"nicotine|tobacco|\bvape\b|e-cig|\bwine\b|\bbeer\b|liquor",
+     "Age-restricted / regulated product"),
+    ("supplement", r"supplement|vitamin|softgel|capsule|probiotic|protein powder|collagen|"
+                   r"melatonin|multivitamin|fish oil|omega",
+     "Dietary supplement — Amazon may require testing/compliance documents"),
+    ("medical", r"test kit|thermometer|blood pressure|glucose|\ba1c\b|covid|pregnancy test|"
+                r"ovulation|hearing aid|condom|contact lens|pulse oximeter|nebulizer",
+     "Medical device — may need approval or documents"),
+    ("infant", r"infant formula|baby formula|toddler formula",
+     "Infant formula (strict expiry & approval rules)"),
+    ("meltable", r"chocolate|candy bar|lip balm|\bwax\b|crayon|gummy bears|gummies",
+     "Meltable — FBA won't accept it in warm months (about Apr 15 – Oct 15)"),
+]
+_COMPLIANCE_RE = [(k, _re.compile(rx, _re.I), msg) for k, rx, msg in COMPLIANCE]
 EXPIRY_WORDS = _re.compile(
     r"(test kit|vitamin|supplement|softgel|gummies|capsule|tablet|lozenge|probiotic|"
     r"protein|formula|sunscreen|spf|medicine|drops\b)", _re.I)
@@ -72,18 +99,41 @@ EXPIRY_CATEGORIES = {"grocery", "grocery & gourmet food", "baby"}
 
 
 def listing_flags(title: str, category: str, est_sales: int | None,
-                  fba_offers: int, cfg: dict) -> tuple[list[str], list[str], bool]:
-    """Returns (serious flags, info warnings, is_seller_bundle)."""
-    serious, info = [], []
+                  fba_offers: int, cfg: dict) -> tuple[list[tuple[str, str]], bool]:
+    """Returns (flags as (key, text), is_seller_bundle)."""
+    flags: list[tuple[str, str]] = []
     bundle = bool(BUNDLE_WORDS.search(title or ""))
     if bundle:
-        serious.append("Seller-made bundle — you'd have to copy their exact add-ons")
+        flags.append(("bundle", "Seller-made bundle — you'd have to copy their exact add-ons"))
     lim = cfg.get("competition", {})
     if est_sales and fba_offers:
         per_seller = est_sales / (fba_offers + 1)
         if per_seller < lim.get("min_sales_per_seller", 2):
-            serious.append(f"Crowded: ~{per_seller:.1f} sales/mo per FBA seller "
-                           f"({fba_offers} FBA sellers)")
-    if EXPIRY_WORDS.search(title or "") or category.lower() in EXPIRY_CATEGORIES:
-        info.append("Has expiration date — Amazon needs 90+ days left; check dates")
-    return serious, info, bundle
+            flags.append(("crowded", f"Crowded: ~{per_seller:.1f} sales/mo per FBA seller "
+                                     f"({fba_offers} FBA sellers)"))
+    for key, rx, msg in _COMPLIANCE_RE:
+        if rx.search(title or ""):
+            flags.append((key, msg))
+    if EXPIRY_WORDS.search(title or "") or (category or "").lower() in EXPIRY_CATEGORIES:
+        flags.append(("expiration", "Has expiration date — Amazon needs 90+ days left; check dates"))
+    return flags, bundle
+
+
+def blocking(flags: list[tuple[str, str]], cfg: dict) -> list[str]:
+    """Flags that remove a product completely (compliance.block)."""
+    keys = set(cfg.get("compliance", {}).get("block", []))
+    return [t for k, t in flags if k in keys]
+
+
+def lead_blockers(flags: list[tuple[str, str]], cfg: dict) -> list[str]:
+    """Flags that keep a product out of the Leads tab (leads.exclude_flags)."""
+    keys = set(cfg.get("leads", {}).get("exclude_flags", []))
+    return [t for k, t in flags if k in keys]
+
+
+SERIOUS = {"amazon_now", "amazon_recent", "ip_drop", "price_spike", "bundle", "crowded",
+           "no_buybox", "hazmat", "pesticide", "cbd"}
+
+
+def n_serious(flags: list[tuple[str, str]]) -> int:
+    return sum(1 for k, _ in flags if k in SERIOUS)

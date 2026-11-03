@@ -1,134 +1,76 @@
 # =====================================================================
-#  Retailer discounts — update weekly from CardBear (gift cards) and
-#  Rakuten (cashback). Percentages: 0.08 = 8%.
+#  Trusted retailers + your discounts. Update discounts weekly from CardBear
+#  (gift cards) and Rakuten (cashback). Percentages: 0.08 = 8%.
 #
+#  Only stores listed here can produce a Lead (see suppliers.allow_unknown_retailers
+#  in config.yaml). Any field you leave out uses the `default` values at the bottom.
+#
+#  match             words that identify the store in Google Shopping results
 #  giftcard_pct      discount on discounted gift cards for this store
-#  giftcard_owned    true = you already hold these cards -> counted as "certain"
+#  giftcard_owned    true = you already hold these cards -> counted as "certain" savings
 #  store_card_pct    e.g. Target Circle Card 5%
 #  store_card_owned  true = you have the card -> counted as "certain"
 #  cashback_pct      Rakuten/portal cashback on the pre-tax subtotal (bonus only)
 #  signup_coupon_pct ONE-TIME email-signup coupon (flagged, never applied to all leads)
 #  tax_exempt        true once this retailer has your resale certificate (CRT-61) on file
-#  free_shipping_min order total needed for free shipping (bot flags small orders)
-#  match             words that identify the store in Google Shopping results
+#  free_shipping_min order total needed for free shipping
 #
-#  Gift card and store card can't pay for the same dollars, so the bot
-#  uses whichever single one is better — it never stacks them.
+#  Gift card and store card can't pay for the same dollars, so the bot uses
+#  whichever single one is better — it never stacks them.
 # =====================================================================
 
 retailers:
-  Walmart:
-    match: ["walmart"]
-    giftcard_pct: 0.00
-    giftcard_owned: false
-    store_card_pct: 0.00
-    store_card_owned: false
-    cashback_pct: 0.00
-    signup_coupon_pct: 0.00
-    tax_exempt: false
-    free_shipping_min: 35.00
+  Walmart:        {match: ["walmart"], free_shipping_min: 35}
+  Target:         {match: ["target"], store_card_pct: 0.05, free_shipping_min: 35}
+  Walgreens:      {match: ["walgreens"], free_shipping_min: 35}
+  CVS:            {match: ["cvs"], free_shipping_min: 35}
+  Rite Aid:       {match: ["rite aid", "riteaid"], free_shipping_min: 35}
+  Vitacost:       {match: ["vitacost"], free_shipping_min: 49}
+  iHerb:          {match: ["iherb"], free_shipping_min: 40}
+  Vitamin Shoppe: {match: ["vitamin shoppe", "vitaminshoppe"], free_shipping_min: 49}
+  GNC:            {match: ["gnc"], free_shipping_min: 49}
+  Swanson:        {match: ["swanson"], free_shipping_min: 35}
+  Lucky Vitamin:  {match: ["luckyvitamin", "lucky vitamin"], free_shipping_min: 49}
+  Thrive Market:  {match: ["thrive market"], free_shipping_min: 49}
+  Kroger:         {match: ["kroger"], free_shipping_min: 35}
+  Meijer:         {match: ["meijer"], free_shipping_min: 35}
+  H-E-B:          {match: ["h-e-b", "heb.com"], free_shipping_min: 35}
+  Sam's Club:     {match: ["sam's club", "sams club"], free_shipping_min: 50}
+  Costco:         {match: ["costco"], free_shipping_min: 0}
+  BJ's:           {match: ["bj's", "bjs.com"], free_shipping_min: 0}
+  Dollar General: {match: ["dollar general"], free_shipping_min: 35}
+  Kohl's:         {match: ["kohl"], free_shipping_min: 49}
+  Macy's:         {match: ["macy"], free_shipping_min: 49}
+  JCPenney:       {match: ["jcpenney"], free_shipping_min: 49}
+  Belk:           {match: ["belk"], free_shipping_min: 49}
+  Nordstrom Rack: {match: ["nordstrom"], free_shipping_min: 89}
+  Ulta:           {match: ["ulta"], free_shipping_min: 35}
+  Sephora:        {match: ["sephora"], free_shipping_min: 0}
+  Home Depot:     {match: ["home depot", "homedepot"], free_shipping_min: 45}
+  Lowe's:         {match: ["lowe's", "lowes"], free_shipping_min: 45}
+  Ace Hardware:   {match: ["ace hardware"], free_shipping_min: 50}
+  Tractor Supply: {match: ["tractor supply"], free_shipping_min: 49}
+  Michaels:       {match: ["michaels"], free_shipping_min: 49}
+  Hobby Lobby:    {match: ["hobby lobby"], free_shipping_min: 50}
+  Staples:        {match: ["staples"], free_shipping_min: 0}
+  Office Depot:   {match: ["office depot", "officemax"], free_shipping_min: 45}
+  Best Buy:       {match: ["best buy"], free_shipping_min: 35}
+  Dick's:         {match: ["dick's sporting", "dicks sporting"], free_shipping_min: 49}
+  Academy:        {match: ["academy sports"], free_shipping_min: 25}
+  Bass Pro:       {match: ["bass pro", "cabela"], free_shipping_min: 50}
+  PetSmart:       {match: ["petsmart"], free_shipping_min: 49}
+  Petco:          {match: ["petco"], free_shipping_min: 35}
+  Chewy:          {match: ["chewy"], free_shipping_min: 49}
+  Five Below:     {match: ["five below"], free_shipping_min: 50}
+  Big Lots:       {match: ["big lots"], free_shipping_min: 50}
+  Wayfair:        {match: ["wayfair"], free_shipping_min: 35}
+  Boxed:          {match: ["boxed"], free_shipping_min: 49}
+  Kirkland's:     {match: ["kirkland's"], free_shipping_min: 75}
+  Zappos:         {match: ["zappos"], free_shipping_min: 0}
+  Lego:           {match: ["lego.com", "lego shop"], free_shipping_min: 35}
+  Bath & Body Works: {match: ["bath & body works", "bath and body works"], free_shipping_min: 50}
 
-  Target:
-    match: ["target"]
-    giftcard_pct: 0.00
-    giftcard_owned: false
-    store_card_pct: 0.05            # Target Circle Card
-    store_card_owned: false
-    cashback_pct: 0.00
-    signup_coupon_pct: 0.00
-    tax_exempt: false
-    free_shipping_min: 35.00
-
-  Walgreens:
-    match: ["walgreens"]
-    giftcard_pct: 0.00
-    giftcard_owned: false
-    store_card_pct: 0.00
-    store_card_owned: false
-    cashback_pct: 0.00
-    signup_coupon_pct: 0.00
-    tax_exempt: false
-    free_shipping_min: 35.00
-
-  CVS:
-    match: ["cvs"]
-    giftcard_pct: 0.00
-    giftcard_owned: false
-    store_card_pct: 0.00
-    store_card_owned: false
-    cashback_pct: 0.00
-    signup_coupon_pct: 0.00
-    tax_exempt: false
-    free_shipping_min: 35.00
-
-  Vitacost:
-    match: ["vitacost"]
-    giftcard_pct: 0.00
-    giftcard_owned: false
-    store_card_pct: 0.00
-    store_card_owned: false
-    cashback_pct: 0.00
-    signup_coupon_pct: 0.00
-    tax_exempt: false
-    free_shipping_min: 49.00
-
-  iHerb:
-    match: ["iherb"]
-    giftcard_pct: 0.00
-    giftcard_owned: false
-    store_card_pct: 0.00
-    store_card_owned: false
-    cashback_pct: 0.00
-    signup_coupon_pct: 0.00
-    tax_exempt: false
-    free_shipping_min: 40.00
-
-  Kohl's:
-    match: ["kohl"]
-    giftcard_pct: 0.00
-    giftcard_owned: false
-    store_card_pct: 0.00
-    store_card_owned: false
-    cashback_pct: 0.00
-    signup_coupon_pct: 0.00
-    tax_exempt: false
-    free_shipping_min: 49.00
-
-  Home Depot:
-    match: ["home depot", "homedepot"]
-    giftcard_pct: 0.00
-    giftcard_owned: false
-    store_card_pct: 0.00
-    store_card_owned: false
-    cashback_pct: 0.00
-    signup_coupon_pct: 0.00
-    tax_exempt: false
-    free_shipping_min: 45.00
-
-  Michaels:
-    match: ["michaels"]
-    giftcard_pct: 0.00
-    giftcard_owned: false
-    store_card_pct: 0.00
-    store_card_owned: false
-    cashback_pct: 0.00
-    signup_coupon_pct: 0.00
-    tax_exempt: false
-    free_shipping_min: 49.00
-
-  Sam's Club:
-    match: ["sam's club", "sams club"]
-    giftcard_pct: 0.00
-    giftcard_owned: false
-    store_card_pct: 0.00
-    store_card_owned: false
-    cashback_pct: 0.00
-    signup_coupon_pct: 0.00
-    tax_exempt: false
-    free_shipping_min: 50.00
-
-# Used for any store not listed above (flagged "unknown retailer — verify
-# it's legitimate and gives a proper invoice").
+# Used for any field a retailer above leaves out, and for unknown stores.
 default:
   giftcard_pct: 0.00
   giftcard_owned: false

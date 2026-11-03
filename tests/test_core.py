@@ -8,7 +8,7 @@ from bot.config import load_config, load_retailers
 from bot.profit import ProductCosts, calc_profit, max_buy_price
 from bot.spapi import parse_catalog_item, parse_fee_result, parse_offers, parse_restrictions
 from bot.store import Store
-from bot.suppliers import best_serp_offer, load_price_lists, match_price_list
+from bot.suppliers import load_price_lists, price_list_offer
 
 CFG = load_config()
 RET = load_retailers()
@@ -136,8 +136,8 @@ def test_history_flags_ip_drop_and_amazon(tmp_path: Path):
         day = (today - dt.timedelta(days=4 - i)).isoformat()
         s.save_snapshot("B1", 20.0, offers, 0, offers, i == 0, 1000, day=day)
     rep = s.analyze("B1", 20.0, 8)
-    assert any("IP complaint" in f for f in rep.flags)
-    assert any("Amazon sold" in f for f in rep.flags)
+    assert any("IP complaint" in t for _, t in rep.flags)
+    assert any("Amazon sold" in t for _, t in rep.flags)
 
 
 def test_alert_dedupe(tmp_path: Path):
@@ -149,22 +149,22 @@ def test_alert_dedupe(tmp_path: Path):
     assert s.should_alert("B1", 13.0, "Eligible", a)
 
 
-def test_supplier_matching(tmp_path: Path):
+def test_price_list_offer(tmp_path: Path):
     (tmp_path / "list.csv").write_text("UPC,Cost,Supplier\n078742000000,4.25,KeHE\n")
     pl = load_price_lists(tmp_path)
-    offer = match_price_list(["078742000000"], pl)
-    assert offer and offer.price == 4.25 and offer.verified
-    results = [{"title": "Great Value Old Fashioned Oats 42 oz", "source": "Walmart", "price": 4.0, "link": "w"},
-               {"title": "Oats", "source": "eBay - seller", "price": 1.0, "link": "e"}]
-    best = best_serp_offer(results, "Great Value Old Fashioned Oats, 42 oz", RET, CFG)
-    assert best.supplier == "Walmart" and best.retailer_key == "Walmart" and best.verified
+    offer = price_list_offer(["0078742000000"], pl)
+    assert offer and offer.price == 4.25 and offer.match == "Exact"
 
 
 def test_listing_flags():
-    serious, info, bundle = rules.listing_flags(
+    flags, bundle = rules.listing_flags(
         "Spring Valley Omega 3-6-9, 120 Softgels + Your Vitamin Guide©", "Health & Household", 56, 1, CFG)
-    assert bundle and any("expiration" in i for i in info)
-    serious, _, bundle = rules.listing_flags("Walgreens Nicotine Lozenge 2mg 72 ct", "Health & Household", 55, 33, CFG)
-    assert not bundle and any("Crowded" in f for f in serious)
-    serious, info, bundle = rules.listing_flags("Great Value Oats 42 oz", "Home & Kitchen", 300, 3, CFG)
-    assert not serious and not info and not bundle
+    keys = {k for k, _ in flags}
+    assert bundle and {"supplement", "expiration", "bundle"} <= keys
+    flags, bundle = rules.listing_flags("Walgreens Nicotine Lozenge 2mg 72 ct", "Health & Household", 55, 33, CFG)
+    keys = {k for k, _ in flags}
+    assert not bundle and {"crowded", "age_restricted"} <= keys
+    flags, _ = rules.listing_flags("Raid Ant & Roach Killer Aerosol 17.5 oz", "Home & Kitchen", 300, 3, CFG)
+    assert rules.blocking(flags, CFG)
+    flags, bundle = rules.listing_flags("Great Value Paper Towels 6 Rolls", "Home & Kitchen", 300, 3, CFG)
+    assert not flags and not bundle

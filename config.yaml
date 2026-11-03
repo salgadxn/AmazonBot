@@ -119,13 +119,26 @@ discovery_keywords:
   - electrolyte powder
 
 # ---------------------------------------------------------------------
-# 6. Supplier price lookup
+# 6. Supplier discovery (SerpApi: Google Shopping, store comparison, Walmart UPC)
 # ---------------------------------------------------------------------
+# Each product costs up to 4 SerpApi searches (UPC search, all-store comparison,
+# Walmart UPC check, title search if the UPC finds nothing). The bot spreads your
+# plan evenly: searches used per run = min(cap below, searches left / days left).
+#   Free plan  250/mo  -> ~8/day  -> ~2-3 products/day
+#   $25 plan 1,000/mo  -> ~33/day -> ~10 products/day
+#   $75 plan 5,000/mo  -> ~160/day -> ~45 products/day
 suppliers:
-  serpapi_max_lookups_per_run: 8    # free plan = 250/month, so keep ~8/day
-  serpapi_cache_days: 3
-  min_title_match: 0.35             # below this, match is marked "verify"
-  blocked_sources:                  # never treat these as suppliers
+  serpapi_max_calls_per_run: 200
+  serpapi_reserve: 5                # keep a few searches spare each month
+  serpapi_cache_days: 2             # reuse a store price for up to 2 days (free)
+  max_price_age_days: 2             # older prices can't make a Lead
+  title_search_fallback: true       # if the UPC finds nothing, search brand + title
+  walmart_upc_check: true           # confirm UPC/price/stock directly on Walmart
+  min_candidate_max_buy: 3.00       # don't spend searches if max buy price < $3
+  allow_unknown_retailers: false    # stores not in retailers.yaml -> Needs Review, not Leads
+  allow_marketplace_sellers: false  # Walmart 3rd-party sellers -> Needs Review (bad ungating invoices)
+  max_options_per_product: 8        # rows per product in the Supplier Options tab
+  blocked_sources:                  # never treated as suppliers
     - amazon
     - ebay
     - mercari
@@ -133,11 +146,28 @@ suppliers:
     - etsy
     - aliexpress
     - temu
+    - shein
     - facebook
     - offerup
     - whatnot
     - dhgate
     - wish
+    - alibaba
+
+# ---------------------------------------------------------------------
+# 6b. Compliance and what may become a Lead
+# ---------------------------------------------------------------------
+compliance:
+  # Products whose title suggests these are dropped completely.
+  # Other checks (supplement, medical, meltable, age_restricted, expiration)
+  # are shown as flags so you can decide.
+  block: [hazmat, pesticide, cbd]
+
+leads:
+  # A product with any of these flags never goes to the Leads tab.
+  exclude_flags: [amazon_now, amazon_recent, ip_drop, bundle, crowded, no_buybox, infant]
+  require_in_stock: false           # true = only offers that say "In stock"; false = allow
+                                    # "Unknown" (flagged). "Out of stock" is always excluded.
 
 # ---------------------------------------------------------------------
 # 7. Alerts (Discord)

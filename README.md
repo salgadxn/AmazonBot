@@ -17,18 +17,49 @@ It never buys anything. You review every lead, check the chart in SellerAmp, the
 
 | Tab | What it is |
 |---|---|
-| **Leads** | Eligible products **with a supplier price** that meet your profit/ROI rules. Sorted by Score. |
-| **Find Supplier** | Eligible, good-demand products with no supplier found yet. Shows the **max buy price** that still works, plus a Google Shopping link. |
-| **Brands** | Every brand scanned, and how many of its products you're eligible for. |
-| **Run Log** | What happened on the last run. |
+| **Leads** | Only products with a **real store offer** that meets your profit and ROI rules. Each row has the store, a **direct buy link**, the advertised price, stock, the date the price was checked, the match level, other stores' prices, and the full profit breakdown. |
+| **Needs Review** | Profitable offers the bot won't trust by itself. "Why not a Lead" says what to check: an uncertain size or pack match, an unknown store, a marketplace seller, stock not confirmed, or a listing flag. |
+| **Supplier Options** | Every store offer found, one row per offer, so you can compare stores. |
+| **No Supplier Yet** | Eligible products with no usable offer. "Why no lead" says exactly why: not searched yet (budget), no offers found, too expensive (with the cheapest price found), only different sizes, out of stock, or a listing problem. |
+| **Brands** | Brands scanned and how many products you're eligible for. |
+| **Run Log** | What happened, including whether supplier search is ON, how many SerpApi searches are left, and any errors. |
+
+### How a supplier offer becomes a Lead
+1. **Found** via your price lists, Google Shopping by UPC, Google's store comparison (every store's price, shipping and stock), and a Walmart UPC lookup.
+2. **Matched**:
+   - **Exact**: the UPC is confirmed.
+   - **Strong**: brand, size or count, and pack all agree.
+   - **Uncertain**: needs your eyes.
+   - **Mismatch**: a different size or pack; never used.
+
+   If Amazon sells a "Pack of 3" and the store sells singles, the bot works out the cost of buying 3.
+3. **Costed** with tax, store shipping, Amazon fees, inbound shipping, prep, storage, returns, and your discounts.
+4. **Lead only if all are true**:
+   - Exact or Strong match
+   - not out of stock
+   - a store in `retailers.yaml`
+   - not a Walmart marketplace seller
+   - price checked within 2 days
+   - meets your profit and ROI rules
+   - no serious listing flag: Amazon selling, possible IP complaint, crowded, seller-made bundle, or no buy box
+
+   Hazmat, pesticide and CBD items are dropped completely. Supplements, medical devices, meltables, age-restricted items and expiration-dated items are flagged.
+
+### SerpApi plan vs. how many products get priced
+Each product uses up to 4 searches. The bot spreads your monthly searches evenly across the days left in the month and prices the most promising products first.
+
+| Plan | Searches/month | Products priced per day (about) |
+|---|---|---|
+| Free | 250 | 2–3 |
+| Starter $25 | 1,000 | ~10 |
+| Developer $75 | 5,000 | ~45 |
 
 **Verified vs estimate:** fees, eligibility, live price and seller counts come straight from Amazon (verified).
 Columns marked *(est)* / *(estimate)* are estimates. Monthly sales are a **rough** guess from sales rank until Keepa is added.
-`Match` says how sure the supplier match is: `UPC (price list)` is exact, `UPC search` is a strong title match, and **`Weak match - verify`** means you should check the size and pack count yourself.
 
 **Red flags** the bot looks for: Amazon selling now or in the last 90 days, sellers dropping fast (possible IP complaint),
 price spikes, a merchant-fulfilled seller holding the buy box, and no buy box. History-based flags start working after
-~1–2 weeks of daily runs, because the bot builds its own price history. Until then, check the Keepa/SellerAmp chart yourself.
+~1–2 weeks of daily runs. Until then, check the Keepa/SellerAmp chart yourself.
 It **cannot** tell if the brand owner is a seller. Check the seller names on the listing.
 
 ---
@@ -66,9 +97,10 @@ Without this, results are still saved. Open a run → **Artifacts → results** 
 Your Discord server → channel ⚙️ **Edit Channel → Integrations → Webhooks → New Webhook → Copy Webhook URL**.
 Add secret `DISCORD_WEBHOOK_URL`.
 
-### 5. Supplier price search (optional, free)
-Sign up at <https://serpapi.com> (free plan = 250 searches/month). Copy your API key and add secret `SERPAPI_KEY`.
-The bot uses about 8 searches per day on the best candidates. Without it, use the **Find Supplier** tab.
+### 5. Supplier search (needed for Leads)
+Sign up at <https://serpapi.com>. Copy your API key from the dashboard and add secret `SERPAPI_KEY`.
+Then run the workflow in `check` mode. Line 5 should say "SerpApi: OK — N searches left".
+Without the key, **Leads stays empty**, and No Supplier Yet says "Supplier search not run: SERPAPI_KEY secret is not set".
 
 ---
 
