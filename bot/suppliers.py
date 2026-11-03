@@ -235,11 +235,16 @@ def offers_from_results(results: list[dict], fetched: str, retailers: dict, cfg:
         if price is None or blocked(src, cfg):
             continue
         key, _ = find_retailer(src, retailers)
+        retailer, third_party, note = src, False, ""
+        m = re.match(r"^(.+?)\s+-\s+(.+)$", src)
+        if key and m and find_retailer(m.group(1), retailers)[0] == key:
+            # Google shows marketplace sellers as "Walmart - Some Seller LLC"
+            retailer, third_party, note = f"{key} (marketplace: {m.group(2)})", True, f"sold by {m.group(2)}"
         offers.append(SupplierOffer(
-            retailer=src, price=float(price), link=r.get("link", ""), title=title, source=source,
+            retailer=retailer, price=float(price), link=r.get("link", ""), title=title, source=source,
             checked=fetched, retailer_key=key, shipping=shipping_from(r),
             availability=availability_from([r.get("delivery", "")] + list(r.get("extensions") or [])),
-            found_by_upc=found_by_upc))
+            found_by_upc=found_by_upc, third_party=third_party, seller_note=note))
     return offers
 
 

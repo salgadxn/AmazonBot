@@ -202,3 +202,11 @@ def test_no_keys_explains(tmp_path):
     p = providers(Store(tmp_path / "t.db"), FakeHTTP(), serper="", serpapi="", tavily="", bestbuy="")
     found = discover(candidate().it, p, RET, CFG)
     assert not found.offers and "SERPER" in found.status.upper()
+
+
+def test_marketplace_seller_detected():
+    from bot.suppliers import offers_from_results
+    o = offers_from_results([{"title": "x", "source": "Walmart - Soles By Hamsa LLC", "price": 5.0, "link": ""},
+                             {"title": "y", "source": "Walmart", "price": 6.0, "link": ""}],
+                            TODAY, RET, CFG, "t", False)
+    assert o[0].third_party and "marketplace" in o[0].retailer and not o[1].third_party
