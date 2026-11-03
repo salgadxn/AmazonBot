@@ -158,3 +158,13 @@ def test_supplier_matching(tmp_path: Path):
                {"title": "Oats", "source": "eBay - seller", "price": 1.0, "link": "e"}]
     best = best_serp_offer(results, "Great Value Old Fashioned Oats, 42 oz", RET, CFG)
     assert best.supplier == "Walmart" and best.retailer_key == "Walmart" and best.verified
+
+
+def test_listing_flags():
+    serious, info, bundle = rules.listing_flags(
+        "Spring Valley Omega 3-6-9, 120 Softgels + Your Vitamin Guide©", "Health & Household", 56, 1, CFG)
+    assert bundle and any("expiration" in i for i in info)
+    serious, _, bundle = rules.listing_flags("Walgreens Nicotine Lozenge 2mg 72 ct", "Health & Household", 55, 33, CFG)
+    assert not bundle and any("Crowded" in f for f in serious)
+    serious, info, bundle = rules.listing_flags("Great Value Oats 42 oz", "Home & Kitchen", 300, 3, CFG)
+    assert not serious and not info and not bundle

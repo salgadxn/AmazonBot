@@ -69,6 +69,11 @@ costs:
 savings:
   count_cashback_toward_pass: false # cashback = bonus only (arrives later, may not track)
 
+# Competition / listing quality
+competition:
+  min_sales_per_seller: 2           # flag if est. sales / (FBA sellers + you) is below this
+  skip_seller_bundles: true         # hide reseller-made bundles ("+ guide", "includes ...")
+
 # ---------------------------------------------------------------------
 # 4. Buying
 # ---------------------------------------------------------------------

@@ -226,12 +226,17 @@ def run(asins: list[str] | None = None) -> int:
                 flags.append("No buy box right now (suppressed?) — priced off lowest FBA offer")
             if o.buybox_is_fba is False:
                 flags.append("Buy box held by a merchant-fulfilled seller")
+            est = rules.est_monthly_sales(it.rank)
+            serious, info, is_bundle = rules.listing_flags(
+                it.title, it.category, est, o.fba_offers, cfg)
+            if is_bundle and cfg.get("competition", {}).get("skip_seller_bundles", True):
+                continue
+            flags += serious
 
             pc = ProductCosts(sell_price=o.sell_price, referral_fee=f.referral,
                               fba_fee=f.fba, closing_fee=f.closing, category=it.category,
                               weight_lb=it.weight_lb, length_in=it.length_in,
                               width_in=it.width_in, height_in=it.height_in)
-            est = rules.est_monthly_sales(it.rank)
             std_max = max_buy_price(pc, cfg, cfg["thresholds"]["min_profit"],
                                     cfg["thresholds"]["min_roi"])
             sm = cfg["starter_mode"]
@@ -240,7 +245,7 @@ def run(asins: list[str] | None = None) -> int:
                            else 0.0)
             if max(std_max, starter_max) <= 0 or o.amazon_on_listing:
                 continue
-            viable.append(dict(it=it, o=o, f=f, pc=pc, est=est, flags=flags, hist=hist,
+            viable.append(dict(it=it, o=o, f=f, pc=pc, est=est, flags=flags, info=info, hist=hist,
                                std_max=std_max, starter_max=starter_max))
 
         # 6. Suppliers
@@ -269,7 +274,7 @@ def run(asins: list[str] | None = None) -> int:
                 "Amazon on listing": "Yes" if o.amazon_on_listing else "No",
                 "Eligibility": "Eligible", "Referral fee": v["f"].referral,
                 "FBA fee": v["f"].fba, "Price stability": v["hist"].stability,
-                "Red flags": "; ".join(v["flags"]), "Last checked": now,
+                "Red flags": "; ".join(v["flags"] + v["info"]), "Last checked": now,
             }
 
             if offer is None:

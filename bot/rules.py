@@ -58,3 +58,32 @@ def score(roi: float, profit: float, est_sales: int | None, fba_offers: int,
     s += 15 if verified_match else 5
     s -= 10 * n_flags
     return round(max(s, 0), 1)
+
+
+import re as _re
+
+BUNDLE_WORDS = _re.compile(
+    r"(\bbundle\b|\bincludes\b|\+ ?your|recipe card|vitamin guide|\bwith (a |an )?(free )?"
+    r"(guide|card|ebook|e-book|pouch|pouches|scoop|spoon|sticker)s?\b|\bbonus\b)", _re.I)
+EXPIRY_WORDS = _re.compile(
+    r"(test kit|vitamin|supplement|softgel|gummies|capsule|tablet|lozenge|probiotic|"
+    r"protein|formula|sunscreen|spf|medicine|drops\b)", _re.I)
+EXPIRY_CATEGORIES = {"grocery", "grocery & gourmet food", "baby"}
+
+
+def listing_flags(title: str, category: str, est_sales: int | None,
+                  fba_offers: int, cfg: dict) -> tuple[list[str], list[str], bool]:
+    """Returns (serious flags, info warnings, is_seller_bundle)."""
+    serious, info = [], []
+    bundle = bool(BUNDLE_WORDS.search(title or ""))
+    if bundle:
+        serious.append("Seller-made bundle — you'd have to copy their exact add-ons")
+    lim = cfg.get("competition", {})
+    if est_sales and fba_offers:
+        per_seller = est_sales / (fba_offers + 1)
+        if per_seller < lim.get("min_sales_per_seller", 2):
+            serious.append(f"Crowded: ~{per_seller:.1f} sales/mo per FBA seller "
+                           f"({fba_offers} FBA sellers)")
+    if EXPIRY_WORDS.search(title or "") or category.lower() in EXPIRY_CATEGORIES:
+        info.append("Has expiration date — Amazon needs 90+ days left; check dates")
+    return serious, info, bundle
