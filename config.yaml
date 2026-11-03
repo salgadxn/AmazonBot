@@ -85,39 +85,146 @@ buying:
 # 5. How much the bot searches each run
 # ---------------------------------------------------------------------
 search:
-  max_brands_per_run: 60            # brands scanned per day (oldest-checked first)
+  max_brands_per_run: 150           # brands scanned per day (oldest-checked first)
   max_pages_per_brand: 10           # 20 products per page
-  discovery_keywords_per_run: 10    # keyword searches used to find NEW brands
+  discovery_keywords_per_run: 30    # keyword searches used to find NEW brands
   eligibility_cache_days: 7         # re-check eligibility weekly
   max_run_minutes: 50               # GitHub free plan = 2,000 min/month for private repos
   skip_variation_parents: true
+  discovery_brands_per_keyword: 20  # new brands tested per keyword (1 eligibility check each)
+  discovery_pages_per_keyword: 2    # 20 products per page
 
-# Words searched to discover new brands you may be eligible for.
+# Words searched to discover new brands you may be eligible for (rotates daily).
 discovery_keywords:
   - protein bar
   - granola
   - coffee pods
   - herbal tea
+  - green tea
   - vitamin c
   - multivitamin gummies
+  - electrolyte powder
+  - collagen powder
   - dog treats
+  - dog chews
+  - cat treats
   - cat litter
+  - bird seed
+  - fish food
   - shampoo
+  - conditioner
   - body wash
+  - bar soap
+  - hand soap
+  - lotion
   - lip balm
+  - deodorant
+  - face wash
+  - sunscreen
+  - toothpaste
+  - mouthwash
+  - dental floss
+  - cotton swabs
+  - razors
+  - hair ties
+  - nail clippers
+  - makeup remover wipes
   - dish soap
+  - dishwasher pods
   - laundry pods
+  - laundry detergent
+  - fabric softener
+  - dryer sheets
+  - stain remover
+  - all purpose cleaner
+  - glass cleaner
+  - disinfecting wipes
+  - sponges
+  - trash bags
   - paper towels
+  - toilet paper
+  - tissues
+  - aluminum foil
+  - plastic wrap
+  - zipper bags
+  - food storage containers
   - storage bins
-  - acrylic paint
+  - hangers
+  - light bulbs
+  - batteries
+  - extension cord
+  - command hooks
+  - duct tape
+  - super glue
   - sticky notes
+  - pens
+  - markers
+  - highlighters
+  - index cards
+  - notebooks
+  - printer paper
+  - acrylic paint
+  - paint brushes
+  - yarn
+  - crochet hooks
+  - glue sticks
+  - construction paper
+  - kids crafts
+  - playing cards
+  - puzzles
+  - board games
+  - party supplies
+  - birthday candles
+  - gift bags
+  - wrapping paper
   - baby wipes
+  - diapers
+  - baby shampoo
+  - pacifier
+  - sippy cup
   - snack variety pack
+  - crackers
+  - cookies
+  - popcorn
+  - nuts
+  - dried fruit
+  - jerky
   - hot sauce
   - seasoning blend
-  - trash bags
-  - hand soap
-  - electrolyte powder
+  - spices
+  - olive oil
+  - pasta
+  - rice
+  - oatmeal
+  - cereal
+  - pancake mix
+  - syrup
+  - honey
+  - peanut butter
+  - jam
+  - coffee beans
+  - ground coffee
+  - creamer
+  - sweetener
+  - drink mix
+  - sparkling water
+  - kitchen utensils
+  - measuring cups
+  - can opener
+  - water bottle
+  - lunch box
+  - pet waste bags
+  - flea comb
+  - first aid kit
+  - bandages
+  - heating pad
+  - reading glasses
+  - phone charger cable
+  - screen protector
+  - car air freshener
+  - microfiber cloths
+  - shoe insoles
+  - socks
 
 # ---------------------------------------------------------------------
 # 6. Supplier discovery — all on free allowances ($0/month)

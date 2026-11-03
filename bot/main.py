@@ -96,14 +96,23 @@ def discover_brands(api: SPAPI, store: Store, cfg: dict, run_log: list[str]) -> 
     start = (dt.date.today().toordinal() * n) % len(kws)
     todays = [kws[(start + i) % len(kws)] for i in range(min(n, len(kws)))]
     added = 0
+    per_kw = int(cfg["search"].get("discovery_brands_per_keyword", 10))
+    pages = int(cfg["search"].get("discovery_pages_per_keyword", 1))
+    tested = 0
     for kw in todays:
+        items, token = [], None
         try:
-            items, _ = api.search_catalog(keywords=kw)
+            for _ in range(pages):
+                found, token = api.search_catalog(keywords=kw, page_token=token)
+                items += found
+                if not token:
+                    break
         except SPAPIAuthError:
             raise
         except SPAPIError as exc:
             run_log.append(f"discovery '{kw}' failed: {exc}")
-            continue
+            if not items:
+                continue
         best_per_brand: dict[str, CatalogItem] = {}
         for it in items:
             if not it.brand or store.known_brand(it.brand) or it.is_variation_parent:
@@ -111,13 +120,15 @@ def discover_brands(api: SPAPI, store: Store, cfg: dict, run_log: list[str]) -> 
             cur = best_per_brand.get(it.brand)
             if cur is None or (it.rank or 10**9) < (cur.rank or 10**9):
                 best_per_brand[it.brand] = it
-        for brand, it in list(best_per_brand.items())[:10]:
+        for brand, it in list(best_per_brand.items())[:per_kw]:
+            tested += 1
             e = api.get_eligibility(it.asin)
             store.save_eligibility(it.asin, e.status, e.message, e.link)
             if e.status == "Eligible":
                 store.add_brand(brand, f"discovered ({kw})")
                 added += 1
-    run_log.append(f"Brand discovery: searched {todays}, added {added} eligible brand(s)")
+    run_log.append(f"Brand discovery: {len(todays)} keywords, tested {tested} new brands, "
+                   f"added {added} eligible brand(s)")
 
 
 def collect_candidates(api: SPAPI, store: Store, cfg: dict, price_list: dict,
