@@ -23,6 +23,10 @@ CREATE TABLE IF NOT EXISTS brands (
   checked_count INT DEFAULT 0, last_checked TEXT);
 CREATE TABLE IF NOT EXISTS alerts (
   asin TEXT PRIMARY KEY, sent TEXT, profit REAL, eligibility TEXT);
+CREATE TABLE IF NOT EXISTS provider_usage (
+  provider TEXT, period TEXT, used INT DEFAULT 0, PRIMARY KEY (provider, period));
+CREATE TABLE IF NOT EXISTS sourcing_log (
+  asin TEXT PRIMARY KEY, day TEXT, outcome TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS serp_cache (
   upc TEXT PRIMARY KEY, fetched TEXT, json TEXT);  -- upc column holds any cache key
 """
@@ -158,3 +162,23 @@ class Store:
     def save_serp(self, upc: str, data):
         self.db.execute("INSERT OR REPLACE INTO serp_cache VALUES (?,?,?)",
                         (upc, today(), json.dumps(data)))
+
+    # ---------------- provider usage
+    def usage_get(self, provider: str, period: str) -> int:
+        row = self.db.execute("SELECT used FROM provider_usage WHERE provider=? AND period=?",
+                              (provider, period)).fetchone()
+        return row[0] if row else 0
+
+    def usage_add(self, provider: str, period: str, n: int = 1):
+        self.db.execute("INSERT INTO provider_usage VALUES (?,?,?) ON CONFLICT(provider, period) "
+                        "DO UPDATE SET used = used + ?", (provider, period, n, n))
+        self.db.commit()
+
+    # ---------------- sourcing log (skip re-searching recent dead ends)
+    def last_sourcing(self, asin: str):
+        return self.db.execute("SELECT day, outcome, detail FROM sourcing_log WHERE asin=?",
+                               (asin,)).fetchone()
+
+    def log_sourcing(self, asin: str, outcome: str, detail: str):
+        self.db.execute("INSERT OR REPLACE INTO sourcing_log VALUES (?,?,?,?)",
+                        (asin, today(), outcome, detail[:300]))

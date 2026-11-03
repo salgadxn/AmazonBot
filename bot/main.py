@@ -16,12 +16,13 @@ from . import rules
 from .config import (DATA_DIR, OUTPUT_DIR, PRICE_LIST_DIR, env, load_config,
                      load_retailers, load_seed_brands)
 from .outputs import (BRAND_COLUMNS, LEAD_COLUMNS, NO_SUPPLIER_COLUMNS, OPTION_COLUMNS,
-                      REVIEW_COLUMNS, discord_alert, discord_summary, write_csv, write_sheets)
+                      REVIEW_COLUMNS, USAGE_COLUMNS, discord_alert, discord_summary, write_csv, write_sheets)
 from .profit import ProductCosts, max_buy_price
-from .sourcing import Candidate, decide, no_supplier_row
+from .providers import BestBuyProvider, SerpApiProvider, SerperProvider, TavilyProvider
+from .sourcing import Candidate, decide, is_lead, needs_verification, no_supplier_row, evaluate_offer
 from .spapi import SPAPI, CatalogItem, SPAPIAuthError, SPAPIError
 from .store import Store
-from .suppliers import SerpApi, load_price_lists, source_product
+from .suppliers import dedupe, discover, free_offers, load_price_lists, upc12, verify
 
 log = logging.getLogger("amazonbot")
 
@@ -29,6 +30,15 @@ log = logging.getLogger("amazonbot")
 def make_client() -> SPAPI:
     return SPAPI(env("SPAPI_LWA_CLIENT_ID", True), env("SPAPI_LWA_CLIENT_SECRET", True),
                  env("SPAPI_REFRESH_TOKEN", True), env("SPAPI_SELLER_ID", True))
+
+
+def make_providers(cfg: dict, store) -> dict:
+    return {
+        "bestbuy": BestBuyProvider(env("BESTBUY_API_KEY"), cfg, store),
+        "serper": SerperProvider(env("SERPER_API_KEY"), cfg, store),
+        "serpapi": SerpApiProvider(env("SERPAPI_KEY"), cfg, store),
+        "tavily": TavilyProvider(env("TAVILY_API_KEY"), cfg, store),
+    }
 
 
 def pct(x: float) -> str:
@@ -57,20 +67,20 @@ def check_setup() -> int:
         if price:
             fees = api.get_fees({items[0].asin: price}).get(items[0].asin)
             print(f"   referral ${fees.referral:.2f}, FBA ${fees.fba:.2f}")
-    key = env("SERPAPI_KEY")
-    if not key:
-        print("5) SerpApi: NOT SET — add a SERPAPI_KEY secret to enable supplier search")
-    else:
-        import tempfile
-        from pathlib import Path
-        tmp = Store(Path(tempfile.mkdtemp()) / "check.db")
-        serp = SerpApi(key, load_config(), tmp)
-        if serp.disabled_reason:
-            print(f"5) SerpApi: PROBLEM — {serp.disabled_reason}")
-        else:
-            print(f"5) SerpApi: OK — {serp.searches_left} searches left this month, "
-                  f"today's budget {serp.budget}")
-    print("\nAmazon keys work. Fix anything marked NOT SET / PROBLEM above.")
+    import tempfile
+    from pathlib import Path
+    tmp = Store(Path(tempfile.mkdtemp()) / "check.db")
+    cfg = load_config()
+    print("5) Pricing providers:")
+    provs = make_providers(cfg, tmp)
+    if provs["bestbuy"].active:
+        provs["bestbuy"].lookup_upcs(["027242923232"], 0)   # one call to validate the key
+    for prov in provs.values():
+        r = prov.report()
+        left = f", {r['Left on free plan']} left" if r["Left on free plan"] != "" else ""
+        print(f"   {prov.name:9} {r['Status']}{left}  (free limit: {prov.limit_note or '-'})")
+    print("\nAmazon keys work. Providers marked OFF/STOPPED are skipped; Leads need at least "
+          "Serper or SerpApi (or your own price lists).")
     return 0
 
 
@@ -270,16 +280,27 @@ def run(asins: list[str] | None = None) -> int:
                        ", ".join(f"{k} {v}" for k, v in dropped.items() if v) if any(dropped.values())
                        else "Dropped before sourcing: none")
 
-        # 6. Supplier discovery — best candidates first, so the search budget goes where it counts
-        serp = SerpApi(env("SERPAPI_KEY"), cfg, store)
-        if serp.disabled_reason:
-            run_log.append(f"⚠️ SUPPLIER SEARCH OFF: {serp.disabled_reason}")
-        else:
-            run_log.append(f"SerpApi OK: {serp.searches_left if serp.searches_left is not None else '?'} "
-                           f"searches left this month; budget this run {serp.budget}")
+        # 6. Suppliers: free sources first, then discovery, then verification
+        providers = make_providers(cfg, store)
+        for p in providers.values():
+            run_log.append(f"Provider {p.name}: " + (f"OFF ({p.disabled_reason})" if p.disabled_reason
+                           else f"ON, run budget {p.budget}" + (f", {p.plan_left} left on free plan"
+                                                                 if p.plan_left is not None else "")))
+        if not any(not providers[k].disabled_reason for k in ("serper", "serpapi")):
+            run_log.append("⚠️ SUPPLIER SEARCH OFF: no Google Shopping provider (add SERPER_API_KEY and/or SERPAPI_KEY)")
+
+        all_upcs = [upc12(u) for c in candidates for u in c.it.upcs[:1]]
+        bby_hits = providers["bestbuy"].lookup_upcs(all_upcs, int(cfg["suppliers"]["cache_days"])) \
+            if all_upcs and providers["bestbuy"].active else {}
+        if bby_hits:
+            run_log.append(f"Best Buy carries {len(bby_hits)} of {len(set(all_upcs))} UPCs")
+
         candidates.sort(key=lambda c: c.priority, reverse=True)
         leads, review, options, no_supplier = [], [], [], []
         min_mb = cfg["suppliers"].get("min_candidate_max_buy", 3.0)
+        skip_days = cfg["suppliers"].get("recheck_after_days", {})
+        deadline = started + 60 * float(cfg["search"].get("max_run_minutes", 50))
+        seen_upcs: dict[str, str] = {}
         for c in candidates:
             blocks = rules.lead_blockers(c.flags, cfg)
             if blocks:
@@ -290,8 +311,42 @@ def run(asins: list[str] | None = None) -> int:
                     c, now, f"Not searched — max buy price ${c.max_buy:.2f} is under ${min_mb:.2f}, "
                             "almost never available that cheap"))
                 continue
-            result = source_product(c.it, price_list, serp, retailers, cfg)
-            lead, rev, opts, none = decide(c, result, retailers, cfg, now)
+
+            offers = free_offers(c.it, price_list, bby_hits, retailers)
+            status, searched = "", False
+            evals = [evaluate_offer(c, o, retailers, cfg) for o in offers]
+            if not is_lead(evals):
+                last = store.last_sourcing(c.it.asin)
+                wait = int(skip_days.get(last[1], 0)) if last else 0
+                age = (dt.date.today() - dt.date.fromisoformat(last[0])).days if last else 999
+                upc_key = upc12(c.it.upcs[0]) if c.it.upcs else ""
+                if last and age < wait:
+                    if not offers:
+                        recheck = dt.date.fromisoformat(last[0]) + dt.timedelta(days=wait)
+                        no_supplier.append(no_supplier_row(
+                            c, now, f"Searched {last[0]}: {last[2]} — rechecks {recheck} (saves searches)"))
+                        continue
+                elif upc_key and upc_key in seen_upcs:
+                    status = f"Same UPC as {seen_upcs[upc_key]} (searched once this run)"
+                elif time.time() > deadline:
+                    no_supplier.append(no_supplier_row(c, now, "Not searched this run: time limit reached "
+                                                                "(GitHub free minutes) — next run"))
+                    continue
+                else:
+                    found = discover(c.it, providers, retailers, cfg)
+                    searched = bool(found.tried)
+                    status = found.status
+                    offers = dedupe(offers + found.offers)
+                    if upc_key:
+                        seen_upcs[upc_key] = c.it.asin
+                    evals = [evaluate_offer(c, o, retailers, cfg) for o in offers]
+                    if not is_lead(evals) and needs_verification(evals):
+                        extra = verify(c.it, offers, providers, retailers, cfg)
+                        if extra:
+                            offers = dedupe(offers + extra)
+            lead, rev, opts, none, outcome = decide(c, dedupe(offers), status, retailers, cfg, now)
+            if searched:
+                store.log_sourcing(c.it.asin, outcome, (none or {}).get("Why no lead", outcome))
             options += opts
             if lead:
                 leads.append(lead)
@@ -302,8 +357,11 @@ def run(asins: list[str] | None = None) -> int:
 
         for rows in (leads, review, no_supplier):
             rows.sort(key=lambda r: r["Score"], reverse=True)
-        run_log.append(f"SerpApi used {serp.calls} searches (+{serp.cache_hits} from cache)"
-                       + (f"; errors: {' | '.join(serp.errors[:3])}" if serp.errors else ""))
+        usage_rows = [p.report() for p in providers.values()]
+        for u in usage_rows:
+            run_log.append(f"{u['Provider']}: used {u['Used this run']} (+{u['Cache hits (free)']} cached), "
+                           f"left {u['Left on free plan'] if u['Left on free plan'] != '' else '?'}"
+                           + (f" — errors: {u['Errors']}" if u["Errors"] else ""))
         result_line = (f"RESULT: {len(leads)} Leads, {len(review)} Needs Review, "
                        f"{len(no_supplier)} without a usable supplier, {len(options)} supplier offers compared")
         run_log.append(result_line)
@@ -315,6 +373,7 @@ def run(asins: list[str] | None = None) -> int:
             "Needs Review": (REVIEW_COLUMNS, review),
             "Supplier Options": (OPTION_COLUMNS, options),
             "No Supplier Yet": (NO_SUPPLIER_COLUMNS, no_supplier),
+            "API Usage": (USAGE_COLUMNS, usage_rows),
             "Brands": (BRAND_COLUMNS, brand_rows),
         }
         for name, (cols, rows) in tabs.items():
@@ -346,7 +405,7 @@ def run(asins: list[str] | None = None) -> int:
                     sent += 1
             discord_summary(webhook, f"**AmazonBot daily run** — {len(leads)} leads, "
                                      f"{len(review)} to review, {sent} new alert(s).\n"
-                                     + "\n".join(m for m in run_log if "SerpApi" in m or "SUPPLIER" in m))
+                                     + "\n".join(m for m in run_log if m.startswith(("Serper", "SerpApi", "Tavily", "Best Buy", "⚠️"))))
     finally:
         (OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
         (OUTPUT_DIR / "run_log.txt").write_text("\n".join(run_log), encoding="utf-8")

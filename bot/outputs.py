@@ -37,6 +37,8 @@ NO_SUPPLIER_COLUMNS = [
     "Max buy price", "Est. sales/mo (estimate)", "Sales rank", "FBA sellers", "Eligibility",
     "Why no lead", "Flags", "Google search", "Last checked",
 ]
+USAGE_COLUMNS = ["Provider", "Status", "Used this run", "Cache hits (free)", "Run budget",
+                 "Left on free plan", "Free limit", "Errors"]
 BRAND_COLUMNS = ["Brand", "Source", "Status", "Eligible products", "Products checked",
                  "Last checked"]
 

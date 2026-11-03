@@ -1,33 +1,31 @@
-"""Supplier discovery. Legitimate sources only — no direct scraping of store sites.
+"""Supplier discovery and verification. Legitimate sources only — no direct
+scraping of store websites.
 
-  1. Your wholesale price lists (data/price_lists/*.csv)       -> free, exact UPC
-  2. Google Shopping search by UPC (SerpApi)                   -> 1 search
-  3. Google "compare stores" list for the best match (SerpApi) -> 1 search, every store
-     with price, shipping and stock text
-  4. Walmart product lookup by UPC (SerpApi)                   -> 1 search, confirms UPC,
-     price, stock and whether Walmart itself is the seller
-  5. If the UPC finds nothing: Google Shopping by brand + title -> 1 search
-
-Every SerpApi call is counted against a per-run budget derived from what's left on
-your SerpApi plan this month, so the bot never burns the whole month in one day.
+Order, cheapest first:
+  FREE      your price lists (exact UPC) and Best Buy's API (exact UPC, stock)
+  DISCOVER  Google Shopping by UPC  — Serper first, SerpApi if Serper is out
+            Google Shopping by brand+title if the UPC finds nothing
+            Tavily page search on trusted store sites as a last resort
+  VERIFY    only for offers that look profitable but aren't confirmed yet:
+            SerpApi Walmart UPC lookup  (UPC + price + stock + who sells it)
+            SerpApi Google store comparison (direct store links + stock text)
 """
 from __future__ import annotations
 
-import calendar
 import csv
 import datetime as dt
 import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-
-import requests
+from urllib.parse import urlparse
 
 from .matching import EXACT, MISMATCH, STRONG, UNCERTAIN, compare
+from .providers import parse_money
 
 log = logging.getLogger(__name__)
-SERPAPI_URL = "https://serpapi.com/search.json"
-SERPAPI_ACCOUNT_URL = "https://serpapi.com/account.json"
+
+RANK = {EXACT: 0, STRONG: 1, UNCERTAIN: 2, MISMATCH: 3}
 
 
 # ---------------------------------------------------------------- data types
@@ -43,11 +41,14 @@ class SupplierOffer:
     retailer_key: str = ""           # key in retailers.yaml ("" = unknown store)
     shipping: float | None = None    # None = not shown
     availability: str = "Unknown"    # In stock / Out of stock / Unknown
-    seller_note: str = ""            # e.g. marketplace seller on Walmart
+    seller_note: str = ""
     third_party: bool = False
     match: str = UNCERTAIN
     match_reason: str = ""
     pack_multiplier: int = 1
+    found_by_upc: bool = False       # result came from searching the exact UPC
+    price_verified: bool = True      # False = price read from page text (Tavily)
+    min_order_units: int = 1         # from price lists (case pack / MOQ)
 
     @property
     def trusted(self) -> bool:
@@ -58,11 +59,21 @@ class SupplierOffer:
         """Price to make ONE Amazon unit (handles 'buy 2 singles for a 2-pack')."""
         return self.price * self.pack_multiplier
 
+    @property
+    def direct_link(self) -> bool:
+        host = urlparse(self.link or "").netloc.lower()
+        return bool(host) and "google." not in host
+
+    @property
+    def upc_verified(self) -> bool:
+        return self.match == EXACT or (self.match == STRONG and self.found_by_upc)
+
 
 @dataclass
 class SourcingResult:
     offers: list[SupplierOffer] = field(default_factory=list)
-    status: str = ""                 # plain-English explanation when nothing usable
+    status: str = ""
+    tried: list[str] = field(default_factory=list)
 
 
 def normalize_upc(code: str) -> str:
@@ -92,11 +103,11 @@ def blocked(source: str, cfg: dict) -> bool:
     return any(b in s for b in cfg["suppliers"]["blocked_sources"])
 
 
-def availability_from(texts: list[str]) -> str:
+def availability_from(texts: list) -> str:
     joined = " ".join(t.lower() for t in texts if isinstance(t, str))
     if "out of stock" in joined or "sold out" in joined or "unavailable" in joined:
         return "Out of stock"
-    if "in stock" in joined or "in-stock" in joined or "available" in joined:
+    if "in stock" in joined or "in-stock" in joined:
         return "In stock"
     return "Unknown"
 
@@ -108,192 +119,146 @@ def shipping_from(store: dict) -> float | None:
                 return float(store[key])
             except (TypeError, ValueError):
                 pass
-    texts = [store.get("shipping", "")] + list(store.get("details_and_offers") or [])
-    texts += [store.get("delivery", "")]
+    texts = [store.get("shipping", ""), store.get("delivery", "")] + list(store.get("details_and_offers") or [])
     joined = " ".join(t.lower() for t in texts if isinstance(t, str))
     if "free" in joined and ("deliver" in joined or "shipping" in joined):
         return 0.0
-    m = re.search(r"\+\s*\$(\d+(?:\.\d+)?)\s*(shipping|delivery)?", joined)
-    if m:
-        return float(m.group(1))
-    return None
+    m = re.search(r"\+\s*\$(\d+(?:\.\d+)?)", joined)
+    return float(m.group(1)) if m else None
 
 
 # ---------------------------------------------------------------- price lists
 
+ALIASES = {
+    "upc": ["upc", "upc code", "gtin", "ean", "barcode", "item upc", "unit upc", "upc/ean", "gtin-12", "gtin12"],
+    "cost": ["cost", "unit cost", "unit price", "price", "wholesale", "wholesale price", "each cost",
+             "cost per unit", "net cost", "your cost"],
+    "case_cost": ["case cost", "case price", "cost per case", "carton cost"],
+    "case_pack": ["case pack", "pack", "casepack", "units per case", "case qty", "inner pack", "qty per case"],
+    "moq": ["moq", "min qty", "minimum", "minimum order", "min order qty"],
+    "supplier": ["supplier", "vendor", "distributor", "source"],
+    "name": ["name", "description", "item description", "product", "product name", "title", "item"],
+    "link": ["link", "url", "product url"],
+    "in_stock": ["in stock", "in_stock", "stock", "availability", "available", "qty available", "on hand"],
+}
+
+
+def _canon(header: str) -> str:
+    h = re.sub(r"[_\s]+", " ", (header or "").strip().lower())
+    for canon, names in ALIASES.items():
+        if h in names:
+            return canon
+    return h
+
+
+def _read_rows(path: Path) -> list[dict]:
+    if path.suffix.lower() == ".csv":
+        with open(path, newline="", encoding="utf-8-sig") as fh:
+            return list(csv.DictReader(fh))
+    if path.suffix.lower() in (".xlsx", ".xlsm"):
+        try:
+            import openpyxl
+        except ImportError:
+            log.warning("openpyxl not installed; skipping %s", path.name)
+            return []
+        ws = openpyxl.load_workbook(path, read_only=True, data_only=True).active
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            return []
+        head = [str(h or "") for h in rows[0]]
+        return [{head[i]: ("" if v is None else str(v)) for i, v in enumerate(r) if i < len(head)}
+                for r in rows[1:]]
+    return []
+
+
+def _num(v) -> float | None:
+    try:
+        return float(str(v).replace("$", "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def load_price_lists(folder: Path) -> dict[str, dict]:
-    """CSV files in data/price_lists/: upc, cost, supplier (+ optional name, link, in_stock)."""
+    """Reads every .csv / .xlsx in data/price_lists/. Understands common header
+    names (UPC/GTIN/EAN, Unit Cost/Price, Case Cost + Case Pack, MOQ, Vendor...).
+    Returns {normalized_upc: row}, keeping the cheapest unit cost per UPC."""
     out: dict[str, dict] = {}
     if not folder.exists():
         return out
-    for path in sorted(folder.glob("*.csv")):
-        with open(path, newline="", encoding="utf-8-sig") as fh:
-            for row in csv.DictReader(fh):
-                row = {k.strip().lower(): (v or "").strip() for k, v in row.items() if k}
-                upc = normalize_upc(row.get("upc", ""))
-                try:
-                    cost = float(row.get("cost", "").replace("$", "").replace(",", ""))
-                except ValueError:
-                    continue
-                if not upc or cost <= 0:
-                    continue
-                row["cost"] = cost
-                row.setdefault("supplier", path.stem)
-                row["file_date"] = dt.date.fromtimestamp(path.stat().st_mtime).isoformat()
-                if upc not in out or cost < out[upc]["cost"]:
-                    out[upc] = row
+    for path in sorted(folder.iterdir()):
+        for raw in _read_rows(path):
+            row = {_canon(k): (str(v).strip() if v is not None else "") for k, v in raw.items() if k}
+            upc = normalize_upc(row.get("upc", ""))
+            cost = _num(row.get("cost"))
+            pack = int(_num(row.get("case_pack")) or 0) or 1
+            if cost is None and _num(row.get("case_cost")):
+                cost = _num(row.get("case_cost")) / pack
+            if not upc or not cost or cost <= 0:
+                continue
+            row["cost"] = round(cost, 4)
+            row["moq"] = int(_num(row.get("moq")) or pack or 1)
+            row.setdefault("supplier", path.stem)
+            row["supplier"] = row.get("supplier") or path.stem
+            row["file_date"] = dt.date.fromtimestamp(path.stat().st_mtime).isoformat()
+            if upc not in out or cost < out[upc]["cost"]:
+                out[upc] = row
     return out
 
 
 def price_list_offer(upcs: list[str], price_list: dict) -> SupplierOffer | None:
     for upc in upcs:
         row = price_list.get(normalize_upc(upc))
-        if row:
-            stock = row.get("in_stock", "").lower()
-            return SupplierOffer(
-                retailer=row.get("supplier", "price list"), price=row["cost"],
-                link=row.get("link", ""), title=row.get("name", ""),
-                source="Your price list", checked=row["file_date"],
-                retailer_key="price list", shipping=None,
-                availability="In stock" if stock in ("yes", "true", "1") else
-                "Out of stock" if stock in ("no", "false", "0") else "Unknown",
-                match=EXACT, match_reason="UPC in your price list")
+        if not row:
+            continue
+        stock = str(row.get("in_stock", "")).lower()
+        qty = _num(stock)
+        availability = ("In stock" if stock in ("yes", "true", "y", "in stock") or (qty and qty > 0) else
+                        "Out of stock" if stock in ("no", "false", "n", "0", "out of stock") else "Unknown")
+        return SupplierOffer(
+            retailer=row.get("supplier", "price list"), price=row["cost"], link=row.get("link", ""),
+            title=row.get("name", ""), source="Your price list", checked=row["file_date"],
+            retailer_key="price list", availability=availability, match=EXACT,
+            match_reason="UPC in your price list", found_by_upc=True,
+            min_order_units=row.get("moq", 1))
     return None
 
 
-# ---------------------------------------------------------------- SerpApi
+# ---------------------------------------------------------------- converters
 
-class SerpApi:
-    """Budgeted SerpApi client with clear diagnostics."""
-
-    def __init__(self, api_key: str, cfg: dict, store, http=None):
-        self.key = api_key
-        self.cfg = cfg["suppliers"]
-        self.store = store
-        self.http = http or requests.Session()
-        self.calls = 0
-        self.cache_hits = 0
-        self.errors: list[str] = []
-        self.searches_left: int | None = None
-        self.budget = 0
-        self.disabled_reason = "" if api_key else "SERPAPI_KEY secret is not set in GitHub"
-        if api_key:
-            self._set_budget()
-
-    def _set_budget(self) -> None:
-        cap = int(self.cfg["serpapi_max_calls_per_run"])
-        try:
-            r = self.http.get(SERPAPI_ACCOUNT_URL, params={"api_key": self.key}, timeout=30)
-            data = r.json()
-            if r.status_code != 200 or data.get("error"):
-                self.disabled_reason = f"SerpApi rejected the key: {data.get('error', r.status_code)}"
-                return
-            left = data.get("total_searches_left", data.get("plan_searches_left"))
-            self.searches_left = int(left) if left is not None else None
-        except Exception as exc:  # network hiccup: fall back to config cap
-            self.errors.append(f"account check failed: {exc}")
-        if self.searches_left is None:
-            self.budget = cap
-            return
-        if self.searches_left <= 0:
-            self.disabled_reason = "SerpApi plan has 0 searches left this month"
-            return
-        today = dt.date.today()
-        days_left = calendar.monthrange(today.year, today.month)[1] - today.day + 1
-        reserve = int(self.cfg.get("serpapi_reserve", 5))
-        daily = max(1, (self.searches_left - reserve) // max(days_left, 1))
-        self.budget = min(cap, daily)
-
-    @property
-    def active(self) -> bool:
-        return not self.disabled_reason and self.budget > 0
-
-    def remaining(self) -> int:
-        return max(self.budget - self.calls, 0) if self.active else 0
-
-    def search(self, params: dict, cache_key: str) -> tuple[dict | None, str]:
-        """Returns (json, fetched_date). Uses the local cache first (free)."""
-        cached = self.store.cached_serp(cache_key, int(self.cfg["serpapi_cache_days"]))
-        if cached is not None:
-            self.cache_hits += 1
-            return cached
-        if not self.active:
-            return None, ""
-        if self.calls >= self.budget:
-            return None, ""
-        self.calls += 1
-        try:
-            r = self.http.get(SERPAPI_URL, params={**params, "api_key": self.key}, timeout=90)
-            data = r.json()
-        except Exception as exc:
-            self.errors.append(f"{params.get('engine')}: {exc}")
-            return None, ""
-        if data.get("error"):
-            err = data["error"]
-            # "no results" is a normal answer, not a failure
-            if "hasn't returned any results" in err or "no results" in err.lower():
-                data = {}
-            else:
-                self.errors.append(f"{params.get('engine')}: {err}")
-                if "run out" in err.lower() or "invalid api key" in err.lower():
-                    self.disabled_reason = f"SerpApi: {err}"
-                return None, ""
-        fetched = dt.date.today().isoformat()
-        self.store.save_serp(cache_key, [data, fetched])
-        return data, fetched
-
-    # ---- engines
-    def shopping(self, query: str):
-        return self.search({"engine": "google_shopping", "q": query, "gl": "us", "hl": "en",
-                            "location": "United States"}, f"gs:{query}")
-
-    def compare_stores(self, page_token: str):
-        return self.search({"engine": "google_immersive_product", "page_token": page_token,
-                            "more_stores": "true"}, f"im:{page_token[:120]}")
-
-    def walmart_upc(self, upc: str):
-        return self.search({"engine": "walmart_product", "upc": upc}, f"wm:{upc}")
-
-
-# ---------------------------------------------------------------- parsing
-
-def offers_from_shopping(data: dict, fetched: str, retailers: dict, cfg: dict) -> tuple[list[SupplierOffer], list[dict]]:
-    """Returns (offers, raw results) — raw results carry immersive page tokens."""
-    offers, raw = [], []
-    for r in (data or {}).get("shopping_results", []) or []:
-        title = r.get("title", "")
-        if r.get("second_hand_condition") or re.search(r"\b(used|refurbished|pre-owned|open box)\b", title, re.I):
+def offers_from_results(results: list[dict], fetched: str, retailers: dict, cfg: dict,
+                        source: str, found_by_upc: bool) -> list[SupplierOffer]:
+    offers = []
+    for r in results or []:
+        title, src, price = r.get("title", ""), r.get("source", ""), r.get("price")
+        if r.get("used") or re.search(r"\b(used|refurbished|pre-owned|open box)\b", title, re.I):
             continue
-        price = r.get("extracted_price")
-        src = r.get("source", "")
         if price is None or blocked(src, cfg):
             continue
         key, _ = find_retailer(src, retailers)
-        raw.append(r)
         offers.append(SupplierOffer(
-            retailer=src, price=float(price), link=r.get("product_link") or r.get("link", ""),
-            title=title, source="Google Shopping", checked=fetched, retailer_key=key,
-            shipping=shipping_from(r), availability=availability_from(
-                [r.get("delivery", "")] + list(r.get("extensions") or []))))
-    return offers, raw
+            retailer=src, price=float(price), link=r.get("link", ""), title=title, source=source,
+            checked=fetched, retailer_key=key, shipping=shipping_from(r),
+            availability=availability_from([r.get("delivery", "")] + list(r.get("extensions") or [])),
+            found_by_upc=found_by_upc))
+    return offers
 
 
-def offers_from_stores(data: dict, fetched: str, retailers: dict, cfg: dict) -> list[SupplierOffer]:
+def offers_from_stores(data: dict, fetched: str, retailers: dict, cfg: dict,
+                       found_by_upc: bool) -> list[SupplierOffer]:
     pr = (data or {}).get("product_results", {}) or {}
     product_title = pr.get("title", "")
     offers = []
     for s in pr.get("stores", []) or []:
-        name = s.get("name", "")
-        price = s.get("extracted_price")
+        name, price = s.get("name", ""), s.get("extracted_price")
         if price is None or blocked(name, cfg):
             continue
-        texts = list(s.get("details_and_offers") or []) + [s.get("tag", "") or ""]
         key, _ = find_retailer(name, retailers)
         offers.append(SupplierOffer(
             retailer=name, price=float(price), link=s.get("link", ""),
-            title=s.get("title") or product_title, source="Google store comparison",
+            title=s.get("title") or product_title, source="Google store comparison (SerpApi)",
             checked=fetched, retailer_key=key, shipping=shipping_from(s),
-            availability=availability_from(texts)))
+            availability=availability_from(list(s.get("details_and_offers") or []) + [s.get("tag") or ""]),
+            found_by_upc=found_by_upc))
     return offers
 
 
@@ -306,14 +271,9 @@ def offer_from_walmart(data: dict, fetched: str, upc: str, retailers: dict) -> S
         v = p
         for k in path:
             v = v.get(k) if isinstance(v, dict) else None
-        if isinstance(v, (int, float)):
-            price = float(v)
+        price = parse_money(v)
+        if price is not None:
             break
-        if isinstance(v, str):
-            m = re.search(r"\d+(?:\.\d+)?", v.replace(",", ""))
-            if m:
-                price = float(m.group())
-                break
     if price is None:
         return None
     seller = p.get("seller_name") or ""
@@ -323,124 +283,200 @@ def offer_from_walmart(data: dict, fetched: str, upc: str, retailers: dict) -> S
         seller = p["seller"]
     third_party = bool(seller) and "walmart" not in str(seller).lower()
     stock = p.get("in_stock")
-    availability = "In stock" if stock is True else "Out of stock" if stock is False else \
-        availability_from([str(p.get("availability_status", ""))])
-    returned_upc = normalize_upc(p.get("upc", ""))
+    availability = ("In stock" if stock is True else "Out of stock" if stock is False else
+                    availability_from([str(p.get("availability_status", ""))]))
     item_id = p.get("us_item_id") or p.get("product_id") or ""
     link = p.get("product_page_url") or (f"https://www.walmart.com/ip/{item_id}" if item_id else "")
     key, _ = find_retailer("walmart", retailers)
     offer = SupplierOffer(
         retailer="Walmart" + (f" (marketplace: {seller})" if third_party else ""),
-        price=price, link=link, title=p.get("title", ""), source="Walmart UPC lookup",
-        checked=fetched, retailer_key=key, shipping=None, availability=availability,
-        seller_note=f"sold by {seller}" if seller else "", third_party=third_party)
-    if returned_upc and returned_upc == normalize_upc(upc):
+        price=price, link=link, title=p.get("title", ""), source="Walmart UPC lookup (SerpApi)",
+        checked=fetched, retailer_key=key, availability=availability,
+        seller_note=f"sold by {seller}" if seller else "", third_party=third_party, found_by_upc=True)
+    returned = normalize_upc(p.get("upc", ""))
+    if returned and returned == normalize_upc(upc):
         offer.match, offer.match_reason = EXACT, "Walmart listing has the same UPC"
     return offer
 
 
-# ---------------------------------------------------------------- orchestration
-
-def source_product(item, price_list: dict, serp: SerpApi, retailers: dict, cfg: dict) -> SourcingResult:
-    """Find every supplier offer for one Amazon product and grade each match."""
-    res = SourcingResult()
-    pl = price_list_offer(item.upcs, price_list)
-    if pl:
-        res.offers.append(pl)
-
-    upc = upc12(item.upcs[0]) if item.upcs else ""
-    tried: list[str] = []
-    skipped: list[str] = []
-    errors_before = len(serp.errors)
-
-    def run(label, fn, *args):
-        data, fetched = fn(*args)
-        if data is None:
-            skipped.append(label)
-            return None, ""
-        tried.append(label)
-        return data, fetched
-
-    raw_results: list[dict] = []
-    if upc:
-        data, fetched = run("Google Shopping (UPC)", serp.shopping, upc)
-        if data is not None:
-            offers, raw_results = offers_from_shopping(data, fetched, retailers, cfg)
-            res.offers += offers
-    if not raw_results and cfg["suppliers"].get("title_search_fallback", True):
-        q = " ".join(f"{item.brand} {item.title}".split()[:12])
-        data, fetched = run("Google Shopping (title)", serp.shopping, q)
-        if data is not None:
-            offers, raw_results = offers_from_shopping(data, fetched, retailers, cfg)
-            res.offers += offers
-
-    _grade(res.offers, item)
-    best_raw = _best_raw(raw_results, res.offers)
-    if best_raw and best_raw.get("immersive_product_page_token"):
-        data, fetched = run("store comparison", serp.compare_stores,
-                            best_raw["immersive_product_page_token"])
-        if data is not None:
-            res.offers += offers_from_stores(data, fetched, retailers, cfg)
-
-    if upc and cfg["suppliers"].get("walmart_upc_check", True):
-        data, fetched = run("Walmart UPC", serp.walmart_upc, upc)
-        if data is not None:
-            wm = offer_from_walmart(data, fetched, upc, retailers)
-            if wm:
-                res.offers.append(wm)
-
-    _grade(res.offers, item)
-    res.offers = _dedupe(res.offers)
-    res.offers.sort(key=lambda o: (o.match not in (EXACT, STRONG), o.availability == "Out of stock",
-                                   not o.trusted, o.unit_cost + (o.shipping or 0)))
-
-    if not res.offers:
-        new_errors = serp.errors[errors_before:]
-        if new_errors:
-            res.status = "SerpApi error: " + new_errors[-1][:150]
-        elif not tried and serp.disabled_reason:
-            res.status = f"Supplier search not run: {serp.disabled_reason}"
-        elif not tried:
-            res.status = "Not searched yet: today's SerpApi budget ran out (will retry next run)"
-        else:
-            res.status = f"No store offers found ({', '.join(tried)})" + \
-                ("" if upc else "; Amazon listing has no UPC")
-    elif skipped and not serp.disabled_reason:
-        res.status = "Partial search (budget ran out before: " + ", ".join(skipped) + ")"
-    return res
+def offer_from_bestbuy(p: dict, fetched: str, retailers: dict) -> SupplierOffer | None:
+    price = parse_money(p.get("salePrice") or p.get("regularPrice"))
+    if price is None:
+        return None
+    key, _ = find_retailer("best buy", retailers)
+    online = p.get("onlineAvailability")
+    return SupplierOffer(
+        retailer="Best Buy", price=price, link=p.get("url", ""), title=p.get("name", ""),
+        source="Best Buy API", checked=fetched, retailer_key=key,
+        availability="In stock" if online else "Out of stock" if online is False else "Unknown",
+        match=EXACT, match_reason="Best Buy UPC lookup", found_by_upc=True)
 
 
-def _grade(offers: list[SupplierOffer], item) -> None:
+PRICE_RE = re.compile(r"\$\s?(\d{1,4}(?:\.\d{2}))")
+
+
+def offers_from_tavily(results: list[dict], fetched: str, retailers: dict, cfg: dict) -> list[SupplierOffer]:
+    offers = []
+    for r in results or []:
+        url = r.get("url", "")
+        host = urlparse(url).netloc.lower()
+        m = PRICE_RE.search(r.get("content", "") or "")
+        if not m or blocked(host, cfg):
+            continue
+        key, _ = find_retailer(host, retailers)
+        offers.append(SupplierOffer(
+            retailer=key or host, price=float(m.group(1)), link=url, title=r.get("title", ""),
+            source="Tavily page search", checked=fetched, retailer_key=key,
+            price_verified=False))
+    return offers
+
+
+# ---------------------------------------------------------------- grading
+
+def grade(offers: list[SupplierOffer], item) -> None:
     for o in offers:
         if o.match == EXACT:
             continue
         m = compare(item.title, item.brand, o.title)
         o.match, o.match_reason, o.pack_multiplier = m.level, m.reason, m.pack_multiplier
-        if o.source == "Google store comparison" and m.level == UNCERTAIN and o.title:
-            # Google grouped this store under the same product; still needs a size check
-            o.match_reason += " (Google lists it as the same product)"
+        if o.found_by_upc and m.level == STRONG:
+            o.match_reason = "found by UPC search; " + o.match_reason
 
 
-def _best_raw(raw: list[dict], offers: list[SupplierOffer]) -> dict | None:
-    by_title = {o.title: o for o in offers}
-    ranked = sorted(raw, key=lambda r: {EXACT: 0, STRONG: 1, UNCERTAIN: 2, MISMATCH: 3}
-                    .get(by_title.get(r.get("title", ""), SupplierOffer("", 0, "", "", "", "")).match, 3))
-    for r in ranked:
-        o = by_title.get(r.get("title", ""))
-        if o and o.match != MISMATCH:
-            return r
-    return None
-
-
-def _dedupe(offers: list[SupplierOffer]) -> list[SupplierOffer]:
+def dedupe(offers: list[SupplierOffer]) -> list[SupplierOffer]:
+    """One offer per store+price, keeping the best-verified version of it."""
     best: dict[tuple, SupplierOffer] = {}
-    rank = {EXACT: 0, STRONG: 1, UNCERTAIN: 2, MISMATCH: 3}
+
+    def quality(o):
+        return (RANK[o.match], not o.found_by_upc, o.availability == "Unknown", not o.direct_link,
+                not o.price_verified)
+
     for o in offers:
         k = (o.retailer.lower().split(" (")[0], round(o.price, 2))
-        cur = best.get(k)
-        if cur is None or rank[o.match] < rank[cur.match] or \
-                (rank[o.match] == rank[cur.match] and cur.availability == "Unknown"):
-            if cur and cur.availability != "Unknown" and o.availability == "Unknown":
-                o.availability = cur.availability
+        if k not in best or quality(o) < quality(best[k]):
             best[k] = o
-    return list(best.values())
+    out = list(best.values())
+    out.sort(key=lambda o: (RANK[o.match], o.availability == "Out of stock", not o.trusted,
+                            o.unit_cost + (o.shipping or 0)))
+    return out
+
+
+# ---------------------------------------------------------------- discovery
+
+def free_offers(item, price_list: dict, bby_hits: dict, retailers: dict) -> list[SupplierOffer]:
+    offers = []
+    pl = price_list_offer(item.upcs, price_list)
+    if pl:
+        offers.append(pl)
+    for u in item.upcs:
+        hit = bby_hits.get(upc12(u))
+        if hit:
+            o = offer_from_bestbuy(hit[0], hit[1], retailers)
+            if o:
+                offers.append(o)
+            break
+    return offers
+
+
+def google_shopping(query: str, providers: dict, cfg: dict, for_discovery: bool = True):
+    """Try Serper, then SerpApi (SerpApi keeps most of its budget for verification).
+    Returns (results, fetched, provider_name) or (None, "", reason)."""
+    days = int(cfg["suppliers"]["cache_days"])
+    serper, serp = providers.get("serper"), providers.get("serpapi")
+    # free cache hits from either provider first
+    for p, prefix in ((serper, "serper-gs:"), (serp, "serpapi-gs:")):
+        if p and p.store.cached_serp(prefix + query, days) is not None:
+            res, fetched = p.shopping(query, days)
+            return res, fetched, p.name + " (cache)"
+    if serper and serper.active:
+        res, fetched = serper.shopping(query, days)
+        if res is not None:
+            return res, fetched, "Serper"
+    if serp and serp.active:
+        share = float(cfg["suppliers"].get("serpapi_discovery_share", 0.4))
+        if not for_discovery or serp.calls < max(1, int(serp.budget * share)):
+            res, fetched = serp.shopping(query, days)
+            if res is not None:
+                return res, fetched, "SerpApi"
+    reasons = [f"{p.name}: {p.disabled_reason or 'run budget used'}" for p in (serper, serp) if p]
+    return None, "", "; ".join(reasons) or "no Google Shopping provider set up"
+
+
+TAVILY_DOMAINS = ["walmart.com", "target.com", "cvs.com", "walgreens.com", "vitacost.com", "iherb.com",
+                  "homedepot.com", "lowes.com", "kohls.com", "ulta.com", "michaels.com", "samsclub.com",
+                  "costco.com", "kroger.com", "meijer.com", "staples.com", "officedepot.com", "petsmart.com",
+                  "petco.com", "chewy.com", "bestbuy.com", "riteaid.com", "gnc.com", "vitaminshoppe.com"]
+
+
+def discover(item, providers: dict, retailers: dict, cfg: dict) -> SourcingResult:
+    res = SourcingResult()
+    upc = upc12(item.upcs[0]) if item.upcs else ""
+    found_any = False
+    why_not: list[str] = []
+    if upc:
+        results, fetched, who = google_shopping(upc, providers, cfg)
+        if results is not None:
+            res.tried.append(f"Google Shopping by UPC via {who}")
+            offers = offers_from_results(results, fetched, retailers, cfg, f"Google Shopping ({who})", True)
+            res.offers += offers
+            found_any = bool(offers)
+        else:
+            why_not.append(who)
+    if not found_any and cfg["suppliers"].get("title_search_fallback", True) and not why_not:
+        q = " ".join(f"{item.brand} {item.title}".split()[:12])
+        results, fetched, who = google_shopping(q, providers, cfg)
+        if results is not None:
+            res.tried.append(f"Google Shopping by title via {who}")
+            offers = offers_from_results(results, fetched, retailers, cfg, f"Google Shopping ({who})", False)
+            res.offers += offers
+            found_any = bool(offers)
+        else:
+            why_not.append(who)
+    tav = providers.get("tavily")
+    if not found_any and tav and tav.active:
+        q = f"{item.brand} {item.title} {upc}".strip()
+        results, fetched = tav.search(" ".join(q.split()[:16]), TAVILY_DOMAINS,
+                                      int(cfg["suppliers"]["cache_days"]))
+        if results is not None:
+            res.tried.append("Tavily page search")
+            res.offers += offers_from_tavily(results, fetched, retailers, cfg)
+    grade(res.offers, item)
+    if not res.offers:
+        if res.tried:
+            res.status = f"No store offers found ({'; '.join(res.tried)})" + ("" if upc else "; listing has no UPC")
+        else:
+            res.status = "Not searched: " + ("; ".join(why_not) or "no search provider available")
+    return res
+
+
+# ---------------------------------------------------------------- verification
+
+def verify(item, offers: list[SupplierOffer], providers: dict, retailers: dict, cfg: dict) -> list[SupplierOffer]:
+    """Spend SerpApi only on products that already look profitable, to confirm UPC,
+    price, stock and get direct store links. Returns new offers to merge."""
+    serp = providers.get("serpapi")
+    if not serp or not serp.active or not item.upcs:
+        return []
+    upc = upc12(item.upcs[0])
+    days = int(cfg["suppliers"]["cache_days"])
+    new: list[SupplierOffer] = []
+    if any(o.retailer_key == "Walmart" and o.match != EXACT for o in offers):
+        data, fetched = serp.walmart_upc(upc, days)
+        wm = offer_from_walmart(data, fetched, upc, retailers) if data else None
+        if wm:
+            new.append(wm)
+    needs_store_check = any(o.retailer_key != "Walmart" and (o.availability == "Unknown" or not o.direct_link
+                                                             or not o.price_verified) for o in offers)
+    if needs_store_check and serp.active:
+        results, fetched = serp.shopping(upc, days)
+        token = ""
+        for r in results or []:
+            if r.get("token") and compare(item.title, item.brand, r.get("title", "")).level != MISMATCH:
+                token = r["token"]
+                break
+        if token and serp.active:
+            data, fetched = serp.compare_stores(token, days)
+            if data:
+                new += offers_from_stores(data, fetched, retailers, cfg, found_by_upc=True)
+    grade(new, item)
+    return new

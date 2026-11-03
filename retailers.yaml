@@ -35,7 +35,7 @@ retailers:
   Kroger:         {match: ["kroger"], free_shipping_min: 35}
   Meijer:         {match: ["meijer"], free_shipping_min: 35}
   H-E-B:          {match: ["h-e-b", "heb.com"], free_shipping_min: 35}
-  Sam's Club:     {match: ["sam's club", "sams club"], free_shipping_min: 50}
+  Sam's Club:     {match: ["sam's club", "sams club", "samsclub"], free_shipping_min: 50}
   Costco:         {match: ["costco"], free_shipping_min: 0}
   BJ's:           {match: ["bj's", "bjs.com"], free_shipping_min: 0}
   Dollar General: {match: ["dollar general"], free_shipping_min: 35}
@@ -53,9 +53,9 @@ retailers:
   Michaels:       {match: ["michaels"], free_shipping_min: 49}
   Hobby Lobby:    {match: ["hobby lobby"], free_shipping_min: 50}
   Staples:        {match: ["staples"], free_shipping_min: 0}
-  Office Depot:   {match: ["office depot", "officemax"], free_shipping_min: 45}
-  Best Buy:       {match: ["best buy"], free_shipping_min: 35}
-  Dick's:         {match: ["dick's sporting", "dicks sporting"], free_shipping_min: 49}
+  Office Depot:   {match: ["office depot", "officemax", "officedepot"], free_shipping_min: 45}
+  Best Buy:       {match: ["best buy", "bestbuy"], free_shipping_min: 35}
+  Dick's:         {match: ["dick's sporting", "dicks sporting", "dickssportinggoods"], free_shipping_min: 49}
   Academy:        {match: ["academy sports"], free_shipping_min: 25}
   Bass Pro:       {match: ["bass pro", "cabela"], free_shipping_min: 50}
   PetSmart:       {match: ["petsmart"], free_shipping_min: 49}

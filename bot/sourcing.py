@@ -53,23 +53,32 @@ def no_supplier_row(c: Candidate, now: str, why: str) -> dict:
             "Google search": f"https://www.google.com/search?tbm=shop&q={quote_plus(q)}"}
 
 
+VERIFIABLE = {"stock", "upc", "link", "price_text", "stale", "match"}
+
+
 @dataclass
 class Evaluated:
     offer: SupplierOffer
     res: object               # ProfitResult
     passes: bool
-    blockers: list[str]       # reasons it can't be a Lead (besides profit)
+    blockers: list            # (code, reason) — why it can't be a Lead (besides profit)
     qty: int
     ship_unit: float
     notes: list[str]
 
+    @property
+    def blocker_text(self) -> list[str]:
+        return [t for _, t in self.blockers]
+
 
 def evaluate_offer(c: Candidate, offer: SupplierOffer, retailers: dict, cfg: dict) -> Evaluated:
-    s_cfg = cfg["suppliers"]
+    s_cfg, l_cfg = cfg["suppliers"], cfg["leads"]
     _, retailer = find_retailer(offer.retailer if offer.retailer_key != "price list" else "", retailers)
     unit_cost = offer.unit_cost
     qty = max(rules.suggested_qty(c.est, c.o.fba_offers, max(unit_cost, 0.01), cfg), 1)
     notes = []
+    if offer.min_order_units > qty:
+        notes.append(f"supplier minimum order {offer.min_order_units} units (suggested {qty})")
     if offer.shipping is None:
         ship_unit = 0.0
         fs_min = retailer.get("free_shipping_min") or 0
@@ -88,28 +97,46 @@ def evaluate_offer(c: Candidate, offer: SupplierOffer, retailers: dict, cfg: dic
     passes = rules.passes(res.profit, res.roi, c.min_profit, c.min_roi) or \
         rules.passes(certain_profit, certain_roi, c.min_profit, c.min_roi)
 
-    blockers = []
-    if offer.match not in USABLE:
-        blockers.append(f"{offer.match} product match: {offer.match_reason}")
+    b = []
+    if offer.match == MISMATCH:
+        b.append(("mismatch", f"different product: {offer.match_reason}"))
+    elif offer.match == UNCERTAIN:
+        b.append(("match", f"uncertain match: {offer.match_reason}"))
+    elif l_cfg.get("require_upc_verified", True) and not offer.upc_verified:
+        b.append(("upc", "UPC not verified (title match only)"))
     if offer.availability == "Out of stock":
-        blockers.append("out of stock")
-    elif offer.availability != "In stock" and cfg["leads"].get("require_in_stock"):
-        blockers.append("stock not confirmed")
+        b.append(("oos", "out of stock"))
+    elif offer.availability != "In stock" and l_cfg.get("require_in_stock", True):
+        b.append(("stock", "stock not confirmed"))
+    if l_cfg.get("require_direct_link", True) and not offer.direct_link and offer.source != "Your price list":
+        b.append(("link", "no direct store link (Google link only)"))
+    if not offer.price_verified:
+        b.append(("price_text", "price read from page text — not verified"))
     if not offer.trusted and not s_cfg.get("allow_unknown_retailers"):
-        blockers.append("store not in your trusted retailers list — verify it's legit and gives invoices")
+        b.append(("untrusted", "store not in your trusted retailers list — verify it's legit and gives invoices"))
     if offer.third_party and not s_cfg.get("allow_marketplace_sellers"):
-        blockers.append(f"marketplace seller ({offer.seller_note}) — invoices won't help ungating")
+        b.append(("marketplace", f"marketplace seller ({offer.seller_note}) — invoices won't help ungating"))
     try:
         age = (dt.date.today() - dt.date.fromisoformat(offer.checked)).days
     except ValueError:
         age = 99
-    if age > s_cfg.get("max_price_age_days", 2):
-        blockers.append(f"price is {age} days old")
-    if offer.availability == "Unknown":
-        notes.append("stock not shown — confirm on the store page")
+    if offer.source != "Your price list" and age > s_cfg.get("max_price_age_days", 2):
+        b.append(("stale", f"price is {age} days old"))
     if offer.pack_multiplier > 1:
         notes.append(f"buy {offer.pack_multiplier} per Amazon unit, bundle + 'do not separate' sticker")
-    return Evaluated(offer, res, passes, blockers, qty, ship_unit, notes)
+    return Evaluated(offer, res, passes, b, qty, ship_unit, notes)
+
+
+def needs_verification(evals: list[Evaluated]) -> bool:
+    """True if some offer is profitable and only missing things SerpApi can confirm."""
+    for ev in evals:
+        if ev.passes and ev.blockers and {c for c, _ in ev.blockers} <= VERIFIABLE:
+            return True
+    return False
+
+
+def is_lead(evals: list[Evaluated]) -> bool:
+    return any(ev.passes and not ev.blockers for ev in evals)
 
 
 def pct(x: float) -> str:
@@ -123,7 +150,8 @@ def offer_cols(ev: Evaluated, others: str = "") -> dict:
         "Units per Amazon unit": o.pack_multiplier, "Cost per Amazon unit": o.unit_cost,
         "Retailer shipping": "not shown" if o.shipping is None else
         ("free" if o.shipping == 0 else f"${o.shipping:.2f}/order"),
-        "Availability": o.availability, "Price checked": o.checked, "Match": o.match,
+        "Availability": o.availability, "Price checked": o.checked,
+        "Match": o.match + (" (UPC verified)" if o.upc_verified and o.match != "Exact" else ""),
         "Match details": o.match_reason, "Other suppliers": others,
     }
 
@@ -155,28 +183,32 @@ def summarize_others(evals: list[Evaluated], chosen: Evaluated | None, limit: in
     return "; ".join(parts)
 
 
-def decide(c: Candidate, sourcing, retailers: dict, cfg: dict, now: str):
-    """Returns (lead_row | None, review_row | None, option_rows, no_supplier_row | None)."""
-    evals = [evaluate_offer(c, o, retailers, cfg) for o in sourcing.offers]
-    options = []
+def option_rows(c: Candidate, evals: list[Evaluated], cfg: dict) -> list[dict]:
+    rows = []
     for ev in evals[: cfg["suppliers"].get("max_options_per_product", 8)]:
         o = ev.offer
-        why = list(ev.blockers)
+        why = ev.blocker_text
         if not ev.passes:
-            why.append(f"profit ${ev.res.profit:.2f} / ROI {pct(ev.res.roi)} below "
-                       f"${c.min_profit:.2f} / {pct(c.min_roi)}")
-        options.append({
+            why = why + [f"profit ${ev.res.profit:.2f} / ROI {pct(ev.res.roi)} below "
+                         f"${c.min_profit:.2f} / {pct(c.min_roi)}"]
+        rows.append({
             "ASIN": c.it.asin, "Product": c.it.title, "Retailer": o.retailer,
             "Trusted store": "Yes" if o.trusted else "No",
             "Advertised price": o.price, "Units per Amazon unit": o.pack_multiplier,
             "Cost per Amazon unit": o.unit_cost,
             "Retailer shipping": offer_cols(ev)["Retailer shipping"],
-            "Availability": o.availability, "Match": o.match, "Match details": o.match_reason,
+            "Availability": o.availability, "Match": offer_cols(ev)["Match"], "Match details": o.match_reason,
             "Net profit": ev.res.profit, "ROI": pct(ev.res.roi),
             "Can be a Lead": "Yes" if ev.passes and not ev.blockers else "No",
             "Why not": "; ".join(why), "Buy link": o.link, "Source": o.source,
             "Price checked": o.checked})
+    return rows
 
+
+def decide(c: Candidate, offers: list[SupplierOffer], status: str, retailers: dict, cfg: dict, now: str):
+    """Returns (lead_row | None, review_row | None, option_rows, no_supplier_row | None, outcome)."""
+    evals = [evaluate_offer(c, o, retailers, cfg) for o in offers]
+    options = option_rows(c, evals, cfg)
     lead_blocks = rules.lead_blockers(c.flags, cfg)
     winners = [ev for ev in evals if ev.passes and not ev.blockers]
     if winners and not lead_blocks:
@@ -185,25 +217,27 @@ def decide(c: Candidate, sourcing, retailers: dict, cfg: dict, now: str):
                **profit_cols(best, c),
                "Score": rules.score(best.res.roi, best.res.profit, c.est, c.o.fba_offers,
                                     best.offer.match == EXACT, rules.n_serious(c.flags))}
-        return row, None, options, None
+        return row, None, options, None, "lead"
 
     profitable = [ev for ev in evals if ev.passes and ev.offer.match != MISMATCH
                   and ev.offer.availability != "Out of stock"]
-    if profitable or (winners and lead_blocks):
-        best = max(profitable or winners, key=lambda e: e.res.profit)
-        why = (["listing flag: " + b for b in lead_blocks]) + best.blockers
+    if profitable:
+        best = max(profitable, key=lambda e: (-len(e.blockers), e.res.profit))
+        why = (["listing flag: " + b for b in lead_blocks]) + best.blocker_text
         row = {**base_row(c, now), **offer_cols(best, summarize_others(evals, best)),
                **profit_cols(best, c), "Why not a Lead": "; ".join(why),
                "Score": rules.score(best.res.roi, best.res.profit, c.est, c.o.fba_offers,
                                     False, rules.n_serious(c.flags))}
-        return None, row, options, None
+        return None, row, options, None, "review"
 
-    return None, None, options, no_supplier_row(c, now, explain_no_lead(c, sourcing, evals))
+    why = explain_no_lead(c, status, evals)
+    outcome = "no_offers" if not evals else ("too_expensive" if why.startswith("Too expensive") else "no_match")
+    return None, None, options, no_supplier_row(c, now, why), outcome
 
 
-def explain_no_lead(c: Candidate, sourcing, evals: list[Evaluated]) -> str:
+def explain_no_lead(c: Candidate, status: str, evals: list[Evaluated]) -> str:
     if not evals:
-        return sourcing.status or "No store offers found"
+        return status or "No store offers found"
     usable = [e for e in evals if e.offer.match in USABLE]
     in_stock = [e for e in usable if e.offer.availability != "Out of stock"]
     if in_stock:
@@ -216,7 +250,7 @@ def explain_no_lead(c: Candidate, sourcing, evals: list[Evaluated]) -> str:
         return f"Matching offers found ({len(usable)}) but all are out of stock"
     unc = [e for e in evals if e.offer.match == UNCERTAIN]
     if unc:
-        e = min(unc, key=lambda e: e.offer.unit_cost)
+        e = min(unc, key=lambda x: x.offer.unit_cost)
         return (f"Only uncertain matches (e.g. {e.offer.retailer} ${e.offer.unit_cost:.2f}: "
                 f"{e.offer.match_reason}) and none profitable")
     e = evals[0]

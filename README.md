@@ -34,9 +34,11 @@ It never buys anything. You review every lead, check the chart in SellerAmp, the
 
    If Amazon sells a "Pack of 3" and the store sells singles, the bot works out the cost of buying 3.
 3. **Costed** with tax, store shipping, Amazon fees, inbound shipping, prep, storage, returns, and your discounts.
-4. **Lead only if all are true**:
-   - Exact or Strong match
-   - not out of stock
+4. **Lead only if all are verified**:
+   - UPC confirmed (Walmart, Best Buy or a price list), or found by searching the exact UPC with brand, size and pack all agreeing
+   - store shows **In stock**
+   - a direct store link (not a Google redirect)
+   - a price that wasn't just read from page text
    - a store in `retailers.yaml`
    - not a Walmart marketplace seller
    - price checked within 2 days
@@ -45,14 +47,29 @@ It never buys anything. You review every lead, check the chart in SellerAmp, the
 
    Hazmat, pesticide and CBD items are dropped completely. Supplements, medical devices, meltables, age-restricted items and expiration-dated items are flagged.
 
-### SerpApi plan vs. how many products get priced
-Each product uses up to 4 searches. The bot spreads your monthly searches evenly across the days left in the month and prices the most promising products first.
+### Free pricing sources ($0/month) and how the bot uses them
+| Source | Secret name | Free limit | What it gives | Role |
+|---|---|---|---|---|
+| Your price lists | (files in `data/price_lists/`) | unlimited | exact UPC, your cost, MOQ | checked first |
+| Best Buy API | `BESTBUY_API_KEY` | 50,000 calls/day | exact UPC, price, online stock, direct link (electronics/toys/media mostly) | checked first, 100 UPCs per call |
+| Serper.dev | `SERPER_API_KEY` | 2,500 credits **one-time** | Google Shopping prices by store (no stock) | main discovery |
+| SerpApi | `SERPAPI_KEY` | 250/month | Google all-store comparison (stock + direct links), Walmart UPC check | verification (+ discovery backup) |
+| Tavily | `TAVILY_API_KEY` | 1,000/month | store pages + page text (price not structured) | last resort; never a Lead by itself |
 
-| Plan | Searches/month | Products priced per day (about) |
-|---|---|---|
-| Free | 250 | 2–3 |
-| Starter $25 | 1,000 | ~10 |
-| Developer $75 | 5,000 | ~45 |
+How searches are saved:
+- Prices are cached for 2 days.
+- Each UPC is searched once per run.
+- Recent dead ends aren't searched again for a while: no offers (14 days), no match (10), too expensive (5).
+- The best products are searched first.
+- SerpApi is only used to **verify** offers that already look profitable.
+- When one provider runs out, the bot switches to the next.
+- The **API Usage** tab shows what's left on each provider.
+
+Getting the keys (all free, no card needed except where a site asks):
+- Serper: <https://serper.dev> → sign up → API key
+- SerpApi: <https://serpapi.com> → sign up → API key
+- Tavily: <https://app.tavily.com> → sign up → API key
+- Best Buy: <https://developer.bestbuy.com> → Get API Key → activate by email
 
 **Verified vs estimate:** fees, eligibility, live price and seller counts come straight from Amazon (verified).
 Columns marked *(est)* / *(estimate)* are estimates. Monthly sales are a **rough** guess from sales rank until Keepa is added.
