@@ -22,22 +22,22 @@ starter_mode:
 # Max sales rank (BSR) per main category. Lower rank = sells more.
 # Roughly "top 1-2%" of each category. Anything not listed uses `default`.
 max_rank:
-  default: 100000
-  Grocery: 60000
-  Grocery & Gourmet Food: 60000
-  Health & Household: 100000
-  Beauty & Personal Care: 100000
-  Beauty: 100000
-  Toys & Games: 80000
-  Home & Kitchen: 150000
-  Kitchen: 150000
-  Pet Supplies: 60000
-  Baby: 40000
-  Office Products: 80000
-  Arts, Crafts & Sewing: 60000
-  Sports & Outdoors: 120000
-  Tools & Home Improvement: 120000
-  Patio, Lawn & Garden: 60000
+  default: 150000
+  Grocery: 90000
+  Grocery & Gourmet Food: 90000
+  Health & Household: 150000
+  Beauty & Personal Care: 150000
+  Beauty: 150000
+  Toys & Games: 120000
+  Home & Kitchen: 250000
+  Kitchen: 250000
+  Pet Supplies: 90000
+  Baby: 60000
+  Office Products: 120000
+  Arts, Crafts & Sewing: 90000
+  Sports & Outdoors: 180000
+  Tools & Home Improvement: 180000
+  Patio, Lawn & Garden: 90000
 
 # ---------------------------------------------------------------------
 # 2. Your costs (matches your SellerAmp setup + extras for accuracy)
@@ -80,9 +80,9 @@ buying:
 # 5. How much the bot searches each run
 # ---------------------------------------------------------------------
 search:
-  max_brands_per_run: 25            # brands scanned per day (oldest-checked first)
-  max_pages_per_brand: 5            # 20 products per page
-  discovery_keywords_per_run: 6     # keyword searches used to find NEW brands
+  max_brands_per_run: 60            # brands scanned per day (oldest-checked first)
+  max_pages_per_brand: 10           # 20 products per page
+  discovery_keywords_per_run: 10    # keyword searches used to find NEW brands
   eligibility_cache_days: 7         # re-check eligibility weekly
   skip_variation_parents: true
 
