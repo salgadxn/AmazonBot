@@ -194,7 +194,9 @@ class SerpApiProvider(Provider):
                          f"im:{token[:150]}", days)
 
     def walmart_upc(self, upc: str, days: int):
-        return self._get({"engine": "walmart_product", "upc": upc}, f"wm:{upc}", days)
+        # SerpApi's Walmart engine takes the UPC in product_id (digits only)
+        upc = "".join(ch for ch in upc if ch.isdigit())
+        return self._get({"engine": "walmart_product", "product_id": upc}, f"wm2:{upc}", days)
 
 
 # ====================================================================== Serper

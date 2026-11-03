@@ -91,6 +91,11 @@ search:
   eligibility_cache_days: 7         # re-check eligibility weekly
   max_run_minutes: 50               # GitHub free plan = 2,000 min/month for private repos
   skip_variation_parents: true
+  min_total_offers: 3               # need 3+ sellers: 1-2 usually means the brand owner (private label)
+  private_label_ratio: 0.8          # skip a brand if 80%+ of its listings have < 3 sellers
+  exclude_brands: [generic, unbranded, unknown, "n/a", "na", none, "no brand", "does not apply",
+                   amazon basics, amazonbasics, amazon essentials, amazon brand, solimo, presto!,
+                   happy belly, mama bear, wag, "365 by whole foods market", "whole foods market"]
   discovery_brands_per_keyword: 20  # new brands tested per keyword (1 eligibility check each)
   discovery_pages_per_keyword: 2    # 20 products per page
 

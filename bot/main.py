@@ -114,8 +114,10 @@ def discover_brands(api: SPAPI, store: Store, cfg: dict, run_log: list[str]) -> 
             if not items:
                 continue
         best_per_brand: dict[str, CatalogItem] = {}
+        excluded = {b.lower() for b in cfg["search"].get("exclude_brands", [])}
         for it in items:
-            if not it.brand or store.known_brand(it.brand) or it.is_variation_parent:
+            if not it.brand or it.brand.lower() in excluded or store.known_brand(it.brand) \
+                    or it.is_variation_parent:
                 continue
             cur = best_per_brand.get(it.brand)
             if cur is None or (it.rank or 10**9) < (cur.rank or 10**9):
@@ -182,6 +184,9 @@ def run(asins: list[str] | None = None) -> int:
 
     for b in load_seed_brands():
         store.add_brand(b, "seed")
+    for b, in store.db.execute("SELECT brand FROM brands WHERE status != 'skip'").fetchall():
+        if b.lower() in {x.lower() for x in cfg["search"].get("exclude_brands", [])}:
+            store.mark_brand_skip(b, "excluded brand (generic / Amazon's own)")
 
     try:
         # 1. Candidates
@@ -196,9 +201,11 @@ def run(asins: list[str] | None = None) -> int:
         else:
             discover_brands(api, store, cfg, run_log)
             items, brand_of = collect_candidates(api, store, cfg, price_list, run_log)
+            excluded = {b.lower() for b in cfg["search"].get("exclude_brands", [])}
             pre_filter = [
                 it for it in items.values()
                 if not (cfg["search"]["skip_variation_parents"] and it.is_variation_parent)
+                and (it.brand or "").lower() not in excluded
                 and rules.rank_ok(it.rank, it.category, cfg)
             ]
         run_log.append(f"Found {len(items)} products, {len(pre_filter)} pass the sales-rank filter")
@@ -230,14 +237,32 @@ def run(asins: list[str] | None = None) -> int:
         # 3. Live offers
         offers = api.get_offers([it.asin for it in eligible]) if eligible else {}
         min_price = cfg["thresholds"]["min_sell_price"]
-        priced = []
+        min_offers = int(cfg["search"].get("min_total_offers", 3))
+        priced, few_sellers = [], 0
+        brand_single: dict[str, list[int]] = {}
         for it in eligible:
             o = offers.get(it.asin)
             if not o or o.error or not o.sell_price:
                 continue
+            b = brand_of.get(it.asin)
+            if b:
+                st = brand_single.setdefault(b, [0, 0])
+                st[1] += 1
+                st[0] += o.total_offers < min_offers
+            if o.total_offers < min_offers:
+                few_sellers += 1      # 1-2 sellers = usually the brand owner / private label
+                continue
             if o.sell_price < min_price:
                 continue
             priced.append((it, o))
+        ratio = float(cfg["search"].get("private_label_ratio", 0.8))
+        pl_brands = [b for b, (single, total) in brand_single.items()
+                     if total >= 5 and single / total >= ratio and not b.startswith("(")]
+        for b in pl_brands:
+            store.mark_brand_skip(b, "private label? (most listings have only 1-2 sellers)")
+        run_log.append(f"Skipped {few_sellers} listings with fewer than {min_offers} sellers"
+                       + (f"; brands marked private label and skipped from now on: {', '.join(pl_brands)}"
+                          if pl_brands else ""))
 
         # 4. Fees
         fees = api.get_fees({it.asin: o.sell_price for it, o in priced}) if priced else {}

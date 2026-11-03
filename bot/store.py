@@ -121,8 +121,13 @@ class Store:
     def update_brand(self, brand: str, eligible: int, checked: int):
         status = "eligible" if eligible else ("gated" if checked else "no results")
         self.db.execute(
-            "UPDATE brands SET status=?, eligible_count=?, checked_count=?, last_checked=? "
-            "WHERE brand=?", (status, eligible, checked, today(), brand))
+            "UPDATE brands SET status=CASE WHEN status='skip' THEN 'skip' ELSE ? END, "
+            "eligible_count=?, checked_count=?, last_checked=? WHERE brand=?",
+            (status, eligible, checked, today(), brand))
+
+    def mark_brand_skip(self, brand: str, why: str):
+        self.db.execute("UPDATE brands SET status='skip', source=source || ' — ' || ? WHERE brand=?",
+                        (why, brand))
 
     def all_brands(self) -> list[tuple]:
         return self.db.execute(
