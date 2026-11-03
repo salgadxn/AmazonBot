@@ -1,0 +1,75 @@
+name: Daily sourcing run
+
+on:
+  schedule:
+    - cron: "17 11 * * *"   # every day ~5:17am Chicago time (11:17 UTC)
+  workflow_dispatch:         # "Run workflow" button
+    inputs:
+      mode:
+        description: "full = normal run, check = test Amazon keys, asins = analyse specific ASINs"
+        default: full
+        type: choice
+        options: [full, check, asins]
+      asins:
+        description: "ASINs (comma-separated) when mode = asins"
+        required: false
+        default: ""
+
+permissions:
+  contents: write            # lets the bot save its price history (data/amazonbot.db)
+
+concurrency:
+  group: sourcing-run
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          SPAPI_LWA_CLIENT_ID: ${{ secrets.SPAPI_LWA_CLIENT_ID }}
+          SPAPI_LWA_CLIENT_SECRET: ${{ secrets.SPAPI_LWA_CLIENT_SECRET }}
+          SPAPI_REFRESH_TOKEN: ${{ secrets.SPAPI_REFRESH_TOKEN }}
+          SPAPI_SELLER_ID: ${{ secrets.SPAPI_SELLER_ID }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          MODE: ${{ github.event.inputs.mode || 'full' }}
+          ASINS: ${{ github.event.inputs.asins }}
+        run: |
+          if [ "$MODE" = "check" ]; then
+            python -m bot.main --check
+          elif [ "$MODE" = "asins" ]; then
+            python -m bot.main --asins "$ASINS"
+          else
+            python -m bot.main
+          fi
+
+      - name: Upload results (download from the run page)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results
+          path: output/
+          if-no-files-found: ignore
+
+      - name: Save price history
+        if: always() && github.event.inputs.mode != 'check'
+        run: |
+          git config user.name "amazonbot"
+          git config user.email "amazonbot@users.noreply.github.com"
+          git add data/amazonbot.db || true
+          git diff --cached --quiet || git commit -m "Update price history $(date -u +%F)"
+          git push || echo "history push skipped"

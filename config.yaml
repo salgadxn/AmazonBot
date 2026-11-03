@@ -1,0 +1,144 @@
+# =====================================================================
+#  AmazonBot settings — edit any number here, commit, and the next run
+#  uses it. Money is in US dollars. Percentages are written as 0.35 = 35%.
+# =====================================================================
+
+marketplace: US                     # Amazon.com only for now
+
+# ---------------------------------------------------------------------
+# 1. What counts as a good lead
+# ---------------------------------------------------------------------
+thresholds:
+  min_profit: 5.00                  # your SellerAmp setting
+  min_roi: 0.35                     # 35%
+  min_sell_price: 10.00             # skip items selling under $10 (fees eat them)
+
+starter_mode:
+  enabled: true                     # turn off after ~3 months / once sales roll in
+  min_profit: 3.00
+  min_roi: 0.30
+  min_est_monthly_sales: 100        # starter rules only apply to fast sellers
+
+# Max sales rank (BSR) per main category. Lower rank = sells more.
+# Roughly "top 1-2%" of each category. Anything not listed uses `default`.
+max_rank:
+  default: 100000
+  Grocery: 60000
+  Grocery & Gourmet Food: 60000
+  Health & Household: 100000
+  Beauty & Personal Care: 100000
+  Beauty: 100000
+  Toys & Games: 80000
+  Home & Kitchen: 150000
+  Kitchen: 150000
+  Pet Supplies: 60000
+  Baby: 40000
+  Office Products: 80000
+  Arts, Crafts & Sewing: 60000
+  Sports & Outdoors: 120000
+  Tools & Home Improvement: 120000
+  Patio, Lawn & Garden: 60000
+
+# ---------------------------------------------------------------------
+# 2. Your costs (matches your SellerAmp setup + extras for accuracy)
+# ---------------------------------------------------------------------
+costs:
+  sales_tax_rate: 0.105             # Chicago general merchandise (Sep 2026)
+  grocery_tax_rate: 0.0225          # local-only grocery tax estimate; check your receipts
+  grocery_categories: ["Grocery", "Grocery & Gourmet Food"]
+  inbound_per_lb: 1.60              # shipping to Amazon, per pound
+  dim_weight_divisor: 139           # inbound billed on max(actual, L*W*H/139)
+  placement_fee: 0.00               # Amazon Optimized Splits
+  prep_per_unit: 0.40
+  misc_per_unit: 0.75               # labels, polybags, boxes, tape
+  storage_months: 2
+  # FBA monthly storage, standard-size, $ per cubic foot. Verify against
+  # Amazon's current fee page once a year; Oct-Dec is peak season.
+  storage_rate_jan_sep: 0.78
+  storage_rate_oct_dec: 2.40
+  returns_reserve:                  # % of sale price set aside for returns
+    default: 0.02
+    Clothing, Shoes & Jewelry: 0.08
+    Grocery & Gourmet Food: 0.01
+    Grocery: 0.01
+  price_drop_test: 0.10             # also show profit if price falls 10%
+
+# ---------------------------------------------------------------------
+# 3. Discounts (details per retailer live in retailers.yaml)
+# ---------------------------------------------------------------------
+savings:
+  count_cashback_toward_pass: false # cashback = bonus only (arrives later, may not track)
+
+# ---------------------------------------------------------------------
+# 4. Buying
+# ---------------------------------------------------------------------
+buying:
+  max_units_first_buy: 15           # beginner cap on suggested quantity
+  max_spend_per_product: 150.00     # set to your budget; caps suggested qty
+
+# ---------------------------------------------------------------------
+# 5. How much the bot searches each run
+# ---------------------------------------------------------------------
+search:
+  max_brands_per_run: 25            # brands scanned per day (oldest-checked first)
+  max_pages_per_brand: 5            # 20 products per page
+  discovery_keywords_per_run: 6     # keyword searches used to find NEW brands
+  eligibility_cache_days: 7         # re-check eligibility weekly
+  skip_variation_parents: true
+
+# Words searched to discover new brands you may be eligible for.
+discovery_keywords:
+  - protein bar
+  - granola
+  - coffee pods
+  - herbal tea
+  - vitamin c
+  - multivitamin gummies
+  - dog treats
+  - cat litter
+  - shampoo
+  - body wash
+  - lip balm
+  - dish soap
+  - laundry pods
+  - paper towels
+  - storage bins
+  - acrylic paint
+  - sticky notes
+  - baby wipes
+  - snack variety pack
+  - hot sauce
+  - seasoning blend
+  - trash bags
+  - hand soap
+  - electrolyte powder
+
+# ---------------------------------------------------------------------
+# 6. Supplier price lookup
+# ---------------------------------------------------------------------
+suppliers:
+  serpapi_max_lookups_per_run: 8    # free plan = 250/month, so keep ~8/day
+  serpapi_cache_days: 3
+  min_title_match: 0.35             # below this, match is marked "verify"
+  blocked_sources:                  # never treat these as suppliers
+    - amazon
+    - ebay
+    - mercari
+    - poshmark
+    - etsy
+    - aliexpress
+    - temu
+    - facebook
+    - offerup
+    - whatnot
+    - dhgate
+    - wish
+
+# ---------------------------------------------------------------------
+# 7. Alerts (Discord)
+# ---------------------------------------------------------------------
+alerts:
+  min_profit: 7.00                  # only ping for strong leads
+  min_roi: 0.50
+  realert_after_days: 14            # repeat only if this long has passed...
+  realert_profit_change: 0.20       # ...or profit changed 20%+, or eligibility changed

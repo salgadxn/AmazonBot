@@ -1,0 +1,33 @@
+# Starting brands to scan (one per line). Store brands are often open to
+# new sellers. The bot adds more brands automatically as it finds ones
+# you're eligible for. Lines starting with # are ignored.
+Great Value
+Equate
+Mainstays
+Parent's Choice
+Spring Valley
+Ol' Roy
+Good & Gather
+up&up
+Market Pantry
+Room Essentials
+Simple Truth
+Kroger
+Private Selection
+Kirkland Signature
+Member's Mark
+CVS Health
+Walgreens
+Signature Select
+O Organics
+Hill Country Fare
+H-E-B
+Clover Valley
+Meijer
+Wegmans
+Publix
+Trader Joe's
+Uncle Buck's
+Bass Pro Shops
+Sam's Choice
+Simply Balanced

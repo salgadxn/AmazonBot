@@ -1,0 +1,140 @@
+# =====================================================================
+#  Retailer discounts — update weekly from CardBear (gift cards) and
+#  Rakuten (cashback). Percentages: 0.08 = 8%.
+#
+#  giftcard_pct      discount on discounted gift cards for this store
+#  giftcard_owned    true = you already hold these cards -> counted as "certain"
+#  store_card_pct    e.g. Target Circle Card 5%
+#  store_card_owned  true = you have the card -> counted as "certain"
+#  cashback_pct      Rakuten/portal cashback on the pre-tax subtotal (bonus only)
+#  signup_coupon_pct ONE-TIME email-signup coupon (flagged, never applied to all leads)
+#  tax_exempt        true once this retailer has your resale certificate (CRT-61) on file
+#  free_shipping_min order total needed for free shipping (bot flags small orders)
+#  match             words that identify the store in Google Shopping results
+#
+#  Gift card and store card can't pay for the same dollars, so the bot
+#  uses whichever single one is better — it never stacks them.
+# =====================================================================
+
+retailers:
+  Walmart:
+    match: ["walmart"]
+    giftcard_pct: 0.00
+    giftcard_owned: false
+    store_card_pct: 0.00
+    store_card_owned: false
+    cashback_pct: 0.00
+    signup_coupon_pct: 0.00
+    tax_exempt: false
+    free_shipping_min: 35.00
+
+  Target:
+    match: ["target"]
+    giftcard_pct: 0.00
+    giftcard_owned: false
+    store_card_pct: 0.05            # Target Circle Card
+    store_card_owned: false
+    cashback_pct: 0.00
+    signup_coupon_pct: 0.00
+    tax_exempt: false
+    free_shipping_min: 35.00
+
+  Walgreens:
+    match: ["walgreens"]
+    giftcard_pct: 0.00
+    giftcard_owned: false
+    store_card_pct: 0.00
+    store_card_owned: false
+    cashback_pct: 0.00
+    signup_coupon_pct: 0.00
+    tax_exempt: false
+    free_shipping_min: 35.00
+
+  CVS:
+    match: ["cvs"]
+    giftcard_pct: 0.00
+    giftcard_owned: false
+    store_card_pct: 0.00
+    store_card_owned: false
+    cashback_pct: 0.00
+    signup_coupon_pct: 0.00
+    tax_exempt: false
+    free_shipping_min: 35.00
+
+  Vitacost:
+    match: ["vitacost"]
+    giftcard_pct: 0.00
+    giftcard_owned: false
+    store_card_pct: 0.00
+    store_card_owned: false
+    cashback_pct: 0.00
+    signup_coupon_pct: 0.00
+    tax_exempt: false
+    free_shipping_min: 49.00
+
+  iHerb:
+    match: ["iherb"]
+    giftcard_pct: 0.00
+    giftcard_owned: false
+    store_card_pct: 0.00
+    store_card_owned: false
+    cashback_pct: 0.00
+    signup_coupon_pct: 0.00
+    tax_exempt: false
+    free_shipping_min: 40.00
+
+  Kohl's:
+    match: ["kohl"]
+    giftcard_pct: 0.00
+    giftcard_owned: false
+    store_card_pct: 0.00
+    store_card_owned: false
+    cashback_pct: 0.00
+    signup_coupon_pct: 0.00
+    tax_exempt: false
+    free_shipping_min: 49.00
+
+  Home Depot:
+    match: ["home depot", "homedepot"]
+    giftcard_pct: 0.00
+    giftcard_owned: false
+    store_card_pct: 0.00
+    store_card_owned: false
+    cashback_pct: 0.00
+    signup_coupon_pct: 0.00
+    tax_exempt: false
+    free_shipping_min: 45.00
+
+  Michaels:
+    match: ["michaels"]
+    giftcard_pct: 0.00
+    giftcard_owned: false
+    store_card_pct: 0.00
+    store_card_owned: false
+    cashback_pct: 0.00
+    signup_coupon_pct: 0.00
+    tax_exempt: false
+    free_shipping_min: 49.00
+
+  Sam's Club:
+    match: ["sam's club", "sams club"]
+    giftcard_pct: 0.00
+    giftcard_owned: false
+    store_card_pct: 0.00
+    store_card_owned: false
+    cashback_pct: 0.00
+    signup_coupon_pct: 0.00
+    tax_exempt: false
+    free_shipping_min: 50.00
+
+# Used for any store not listed above (flagged "unknown retailer — verify
+# it's legitimate and gives a proper invoice").
+default:
+  giftcard_pct: 0.00
+  giftcard_owned: false
+  store_card_pct: 0.00
+  store_card_owned: false
+  cashback_pct: 0.00
+  signup_coupon_pct: 0.00
+  tax_exempt: false
+  free_shipping_min: 35.00
